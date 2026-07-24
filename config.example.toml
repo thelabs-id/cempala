@@ -1,0 +1,60 @@
+# cempala — example configuration
+#
+# This file is the *shape* of ~/.cempala/config.toml. Cempala writes a default
+# version of this file on first run (`cempala --init`). The default file is the
+# starting point; the real enforcement baselines (denylisted paths, denylisted
+# prompt patterns) are compiled into the binary, so editing this file can only
+# *add* to those baselines, never weaken them.
+#
+# All paths here may use `~/` as a portable placeholder; cempala expands it
+# against os.homedir() at load time.
+
+[server]
+db_path = "~/.cempala/cempala.db"
+output_dir = "~/.cempala/outputs"
+
+[trust]
+# `home_root` is deliberately omitted. When absent, cempala calls os.homedir()
+# fresh at every server start, so the trust boundary cannot go stale.
+# Uncomment and set ONLY if you want a different boundary:
+# home_root = "/custom/path"
+
+# These are starting-point denylist entries; the compiled baseline is unioned
+# on top and cannot be removed by trimming this list.
+denylist = [
+  "~/.ssh",
+  "~/.aws",
+  "~/.gnupg",
+  "~/.docker",
+  "~/.config/gh",
+  "~/.kube",
+  "~/.npmrc",
+  "~/.netrc",
+]
+
+[dispatch]
+default_wait_seconds = 120
+max_wait_seconds = 600
+allow_network_default = false
+
+[dispatch.denylist]
+# These are starting-point prompt denylist patterns; the compiled baseline is
+# unioned on top and cannot be removed by trimming this list.
+patterns = [
+  "rm -rf",
+  "sudo ",
+  "curl | sh",
+  "curl | bash",
+  "git push --force",
+  "chmod -R 777",
+]
+
+# Commands are argv arrays, never shell strings — they are passed straight
+# to Bun.spawn with no shell in between, so quoted prompts survive intact.
+[agents.codex]
+exec_command = ["codex", "exec"]
+sandbox_args = ["--sandbox", "workspace-write"]
+
+[agents.claude]
+exec_command = ["claude", "-p"]
+permission_args = ["--permission-mode", "acceptEdits"]

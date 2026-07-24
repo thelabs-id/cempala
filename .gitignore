@@ -1,0 +1,28 @@
+# Bun
+node_modules/
+bun.lockb
+
+# Build output
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local test artifacts
+.cempala-test-*
+test-codespawn*.ts
+test-claude-args*.ts
+test-paths*.ts
+test-spawn*.ts
+test-mcp.ts
+
+# Cempala local state (intentionally — see AGENTS.md §10: deleting ~/.cempala
+# fully resets the system; this also covers the per-repo test working dir)
+.cempala/
