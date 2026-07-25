@@ -132,6 +132,39 @@ describe("check_messages (FR-2)", () => {
     } finally { env.cleanup(); }
   });
 
+  test("P1: wrong-type `since` is rejected (not silently coerced)", () => {
+    // The schema advertises `["number", "null"]` but the MCP wire
+    // format doesn't enforce it. A wrong-type `since` would either
+    // be coerced to NaN or bound as a string, both silently.
+    const env = makeEnv();
+    try {
+      const r = checkMessages(env.db, {
+        agent_id: "claude",
+        since: "5" as unknown as number,
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("invalid_input");
+        expect(r.error).toMatch(/since/i);
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("P1: wrong-type `thread_id` is rejected", () => {
+    const env = makeEnv();
+    try {
+      const r = checkMessages(env.db, {
+        agent_id: "claude",
+        thread_id: 123 as unknown as string,
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("invalid_input");
+        expect(r.error).toMatch(/thread_id/i);
+      }
+    } finally { env.cleanup(); }
+  });
+
   test("P2: two concurrent check_messages calls don't both get the same unread", () => {
     // In the two-writer setup, two callers can race. The atomic
     // claim (UPDATE-then-SELECT in a single transaction) ensures

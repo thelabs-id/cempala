@@ -38,8 +38,32 @@ export interface MessageRow {
 }
 
 export function checkMessages(db: DB, input: CheckMessagesInput): Result<MessageRow[]> {
-  if (!input.agent_id) {
-    return { ok: false, error: "agent_id is required", code: "invalid_input" };
+  if (!input.agent_id || typeof input.agent_id !== "string") {
+    return { ok: false, error: "agent_id is required and must be a string", code: "invalid_input" };
+  }
+  // Runtime type check (P1 fix). The schema advertises `["X", "null"]`
+  // but the MCP wire format doesn't enforce it. A wrong-type `since`
+  // would either be coerced to NaN (and break the `created_at >= ?`
+  // query) or be passed as a string into the SQL params (which
+  // SQLite would bind, but with surprising semantics). `thread_id`
+  // being a non-string is similarly dangerous: a number would be
+  // bound, but the `WHERE thread_id = ?` comparison would silently
+  // match only by SQL collation, not by content.
+  if (input.since !== undefined && input.since !== null) {
+    if (typeof input.since !== "number" || !Number.isFinite(input.since)) {
+      return {
+        ok: false,
+        error: `since must be a finite number or null (got ${typeof input.since})`,
+        code: "invalid_input",
+      };
+    }
+  }
+  if (input.thread_id !== undefined && input.thread_id !== null && typeof input.thread_id !== "string") {
+    return {
+      ok: false,
+      error: `thread_id must be a string or null (got ${typeof input.thread_id})`,
+      code: "invalid_input",
+    };
   }
   const since = input.since ?? null;
   const thread = input.thread_id ?? null;

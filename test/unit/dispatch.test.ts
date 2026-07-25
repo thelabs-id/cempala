@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { makeEnv, outsideHomeDir } from "./_helpers.ts";
+import { makeEnv, outsideHomeDir, canonicalizeHome } from "./_helpers.ts";
 import { dispatch } from "../../src/tools/dispatch.ts";
 import { approvePath } from "../../src/tools/approve-path.ts";
 import { DEFAULT_CONFIG, type AppConfig } from "../../src/config.ts";
@@ -391,12 +391,17 @@ describe("dispatch (FR-6) — fake CLI", () => {
     // like '~' would validate as the home directory but spawn in the
     // server's CWD. The fix: validate and spawn against the same
     // canonicalized absolute path.
+    //
+    // Note: `cwd: "~"` is now a strict ancestor of the denylist roots
+    // (`~/.ssh`, etc.), so the trust boundary returns `needs_approval`
+    // before any spawn — which is the correct new behavior. To verify
+    // the canonicalization-consistency fix in isolation, this test
+    // observes the needs_approval verdict and asserts that the path in
+    // the verdict equals the canonical home. The "validation and spawn
+    // agree" property is exercised by the `completed` tests above
+    // (which use a real subpath under home and verify spawn succeeded).
     const env = makeEnv();
     try {
-      // The fake CLI is configured to exit 0 immediately, so the only
-      // observable thing is that dispatch doesn't reject and doesn't
-      // error. If the cwd were wrong (i.e. server CWD is not under
-      // home), the spawn would fail with spawn failed.
       const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
       const r = await dispatch(env.db, cfg, {
         target_agent: "codex",
@@ -404,10 +409,112 @@ describe("dispatch (FR-6) — fake CLI", () => {
         cwd: "~", // resolves to $HOME
         created_by: "claude",
       });
+      // cwd="~" is a strict ancestor of the denylist (contains ~/.ssh),
+      // so the trust boundary correctly returns needs_approval. The
+      // canonicalize machinery still has to expand `~` against
+      // homedir() before the trust boundary sees it.
       expect(r.ok).toBe(true);
       if (r.ok) {
-        // It's now allowed (under home) and not needs_approval.
-        expect(r.data.status).toBe("completed");
+        expect(r.data.status).toBe("needs_approval");
+        if (r.data.status === "needs_approval") {
+          // The path in the verdict must be the canonical home, not
+          // the raw "~" or the server's process cwd. A bug here
+          // would mean the trust boundary was told a different
+          // location than the caller asked about.
+          expect(r.data.path).toBe(canonicalizeHome());
+        }
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("P1: cwd=~ is needs_approval (ancestor of denylist), no spawn happens", async () => {
+    // Documents the new behavior: a cwd that contains a denylist root
+    // as a subpath is treated as needs_approval (not denied, not
+    // allowed). The user must narrow their cwd to a project
+    // subdirectory. This test guards against accidental regressions
+    // that let `cwd=~` through to spawn, which would let the child
+    // read `~/.ssh` etc. We assert no fake-CLI output file was
+    // produced.
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "codex",
+        prompt: "x",
+        cwd: "~",
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.data.status).toBe("needs_approval");
+        if (r.data.status === "needs_approval") {
+          // The `reason` must be `ancestor_of_denylist` so the
+          // calling agent can tell the user to narrow the cwd
+          // (rather than asking them to approve home wholesale —
+          // which `canApprove` would also reject).
+          expect(r.data.reason).toBe("ancestor_of_denylist");
+        }
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("P1: wait_seconds with wrong type is rejected (not silently NaN)", async () => {
+    // Per the P1 fix: a wrong-type `wait_seconds` (string, NaN) would
+    // either be coerced or produce a NaN deadline, which would hang
+    // the dispatch. The handler now rejects at the type-check stage.
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "codex",
+        prompt: "x",
+        cwd: homeCwd,
+        wait_seconds: "5" as unknown as number,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("invalid_input");
+        expect(r.error).toMatch(/wait_seconds/i);
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("P1: wait_seconds with NaN is rejected", async () => {
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "codex",
+        prompt: "x",
+        cwd: homeCwd,
+        wait_seconds: Number.NaN,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.code).toBe("invalid_input");
+    } finally { env.cleanup(); }
+  });
+
+  test("P1: empty-string `created_by` is rejected (not silently FK-errored)", async () => {
+    // An empty string passes the `typeof === "string"` check and the
+    // `if (createdBy)` truthy check both succeed, so the FK insert
+    // would fail with FOREIGN KEY constraint — a raw SQL exception
+    // bubbled out of the tool boundary. We now reject at the
+    // type-check stage with a clear error.
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "codex",
+        prompt: "x",
+        cwd: homeCwd,
+        created_by: "",
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("invalid_input");
+        expect(r.error).toMatch(/created_by/i);
       }
     } finally { env.cleanup(); }
   });

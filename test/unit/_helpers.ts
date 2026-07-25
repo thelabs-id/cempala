@@ -14,6 +14,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { openDatabase, type DB } from "../../src/db/client.ts";
 import { DEFAULT_CONFIG, type AppConfig } from "../../src/config.ts";
+import { canonicalize } from "../../src/security/paths.ts";
 
 export interface TestEnv {
   dir: string;
@@ -69,4 +70,13 @@ export function withEnv(fn: (env: TestEnv) => void | Promise<void>) {
 export function outsideHomeDir(prefix: string = "cempala-outside-"): string {
   const base = process.platform === "win32" ? "C:\\" : "/tmp";
   return mkdtempSync(join(base, prefix));
+}
+
+/**
+ * The canonicalized home directory for the test environment. Used by
+ * tests that need to assert "the trust boundary saw the canonical
+ * home, not a different path" (e.g. cwd="~" expansion).
+ */
+export function canonicalizeHome(): string {
+  return canonicalize(homedir());
 }

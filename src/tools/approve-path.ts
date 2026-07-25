@@ -20,7 +20,8 @@ export interface ApprovePathInput {
 
 export type ApprovePathOutput =
   | { ok: true; path: string; already_approved: boolean }
-  | { ok: false; error: string; code: "denylist"; path: string; root: string };
+  | { ok: false; error: string; code: "denylist"; path: string; root: string }
+  | { ok: false; error: string; code: "denylist"; path: string; root: string; reason: "contains_denylist" };
 
 /**
  * Result discriminated union: outer ok is the tool call's success/failure,
@@ -40,6 +41,19 @@ export function approvePath(
   const verdict = canApprove(input.path, pathDenylist);
   if (!verdict.ok) {
     // FR-11c: a denylisted path can never be approved, even by explicit request.
+    // Two cases: (1) the path itself is on the denylist, (2) the path
+    // contains a denylist root as a subpath. The second would let a
+    // future dispatch with a broad cwd undermine the denylist, so we
+    // refuse it at approval time. Both surface as the same MCP error
+    // code ("denylist") — the caller's policy is the same: pick a
+    // narrower path. The internal `reason` is for tests / debugging.
+    if (verdict.reason === "contains_denylist") {
+      return {
+        ok: false,
+        error: `path contains a denylist root (${verdict.root}); narrow the path to a subdirectory that is not on the denylist`,
+        code: "denylist",
+      };
+    }
     return {
       ok: false,
       error: `path is on the denylist (${verdict.root}); cannot be approved`,

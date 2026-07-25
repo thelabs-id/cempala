@@ -234,6 +234,23 @@ describe("findForbiddenFlag / assertArgvSafe (FR-14 config passthrough)", () => 
       "agents.codex.exec_command",
     )).toThrow(/forbidden flag/i);
   });
+
+  test("P1: claude --add-dir is forbidden (FR-14 cwd-anchored scope, parity with codex)", () => {
+    // Symmetric to the codex case: Claude's `--add-dir <directories...>`
+    // (visible in `claude --help`) widens the tool scope beyond the
+    // validated `cwd`. Rejecting it on codex but not on claude would
+    // let a single agent bypass the cwd scope; the table is now
+    // `cli: "any"` so both CLIs are covered.
+    expect(findForbiddenFlag(
+      ["claude", "-p", "--add-dir", "/"],
+      "claude",
+    )).toBe("--add-dir");
+    expect(() => assertArgvSafe(
+      ["claude", "-p", "--add-dir", "C:\\other"],
+      "claude",
+      "agents.claude.exec_command",
+    )).toThrow(/forbidden flag/i);
+  });
 });
 
 describe("loadConfig rejects FR-14-weakening configs", () => {

@@ -95,7 +95,12 @@ const TOOL_DEFS = [
       from_agent: { type: "string" },
       to_agent: { type: "string" },
       content: { type: "string" },
-      thread_id: { type: "string" },
+      // Accept null for fields that handlers treat as "not set"; the
+      // MCP wire format does not enforce type strictness, but some
+      // clients reject properties whose schema does not list "null"
+      // as an allowed type. Mirroring the handler's accept-null
+      // behavior in the schema is the documented interop fix.
+      thread_id: { type: ["string", "null"] },
     },
     required: ["from_agent", "to_agent", "content"],
   }),
@@ -103,8 +108,8 @@ const TOOL_DEFS = [
     type: "object",
     properties: {
       agent_id: { type: "string" },
-      since: { type: "number", description: "Unix ms; when set, return all messages >= this timestamp" },
-      thread_id: { type: "string" },
+      since: { type: ["number", "null"], description: "Unix ms; when set, return all messages >= this timestamp" },
+      thread_id: { type: ["string", "null"] },
     },
     required: ["agent_id"],
   }),
@@ -113,7 +118,7 @@ const TOOL_DEFS = [
     properties: {
       description: { type: "string" },
       created_by: { type: "string" },
-      assigned_to: { type: "string" },
+      assigned_to: { type: ["string", "null"] },
       cwd: { type: "string" },
     },
     required: ["description", "created_by", "cwd"],
@@ -141,10 +146,10 @@ const TOOL_DEFS = [
       target_agent: { type: "string", enum: ["codex", "claude"] },
       prompt: { type: "string" },
       cwd: { type: "string" },
-      wait_seconds: { type: "number", description: "Max wait time; capped at 600 (config.dispatch.max_wait_seconds)" },
-      allowed_tools: { type: "array", items: { type: "string" } },
-      allow_network: { type: "boolean" },
-      created_by: { type: "string" },
+      wait_seconds: { type: ["number", "null"], description: "Max wait time; capped at 600 (config.dispatch.max_wait_seconds)" },
+      allowed_tools: { type: ["array", "null"], items: { type: "string" } },
+      allow_network: { type: ["boolean", "null"] },
+      created_by: { type: ["string", "null"] },
     },
     required: ["target_agent", "prompt", "cwd"],
   }),
@@ -199,7 +204,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     duration_ms: Date.now() - t0,
     timestamp: t0,
   });
+  // The MCP `tools/call` response distinguishes success from failure with
+  // the top-level `isError` flag. Clients are not required to inspect the
+  // `content[*].text` JSON to discover that `ok: false` — the spec
+  // lets a client surface the error message from `isError=true` directly
+  // and skip parsing the body. Without this flag, denylist hits and
+  // invalid-state errors are indistinguishable from successful results
+  // to a strict client. We keep the structured JSON body intact so
+  // non-strict clients (and our own tests) can still consume it.
   return {
+    isError: !ok,
     content: [
       {
         type: "text",

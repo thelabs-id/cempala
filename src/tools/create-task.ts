@@ -30,7 +30,9 @@ export interface CreateTaskInput {
 
 export type CreateTaskOutput =
   | { status: "pending"; task_id: string; cwd: string }
-  | { status: "needs_approval"; path: string; task_id: string };
+  // `reason` distinguishes "approve this path" from "narrow the cwd"
+  // — see the matching comment on DispatchOutput.
+  | { status: "needs_approval"; path: string; task_id: string; reason: "outside_home" | "ancestor_of_denylist" };
 
 export function createTask(
   db: DB,
@@ -39,6 +41,35 @@ export function createTask(
 ): Result<CreateTaskOutput> {
   if (!input.description || !input.created_by || !input.cwd) {
     return { ok: false, error: "description, created_by, and cwd are required", code: "invalid_input" };
+  }
+  // Runtime type checks (P1 fix). The schema advertises
+  // `["string", "null"]` for `assigned_to` but the MCP wire format
+  // doesn't enforce it. A wrong type passed to `ensureAgent` would
+  // either be a no-op (number `0`, boolean `false`) or get coerced
+  // into a string in a misleading way (`[object Object]`).
+  //
+  // Empty string is also rejected (P1 fix): the truthy check on
+  // `if (input.assigned_to)` would skip `ensureAgent("")` and the FK
+  // insert would then fail with FOREIGN KEY constraint. The user
+  // gets a clearer error here than a raw SQL exception.
+  if (input.assigned_to !== undefined && input.assigned_to !== null) {
+    if (typeof input.assigned_to !== "string" || input.assigned_to.length === 0) {
+      return {
+        ok: false,
+        error: `assigned_to must be a non-empty string or null (got ${JSON.stringify(input.assigned_to)})`,
+        code: "invalid_input",
+      };
+    }
+  }
+  if (typeof input.description !== "string" || typeof input.created_by !== "string" || typeof input.cwd !== "string") {
+    return {
+      ok: false,
+      error: `description, created_by, and cwd must all be strings`,
+      code: "invalid_input",
+    };
+  }
+  if (input.created_by.length === 0) {
+    return { ok: false, error: "created_by must be a non-empty string", code: "invalid_input" };
   }
   // Pre-seed agents so created_by / assigned_to are always FK-valid.
   ensureAgent(db, input.created_by);
@@ -90,7 +121,9 @@ export function createTask(
     );
     return {
       ok: true,
-      data: { status: "needs_approval", path: validatedCwd, task_id: id },
+      // Pass through the verdict's reason so the caller can tell
+      // "approve this path" from "narrow the cwd".
+      data: { status: "needs_approval", path: validatedCwd, task_id: id, reason: verdict.reason },
     };
   }
   // verdict.kind === "allowed" — stays pending, possibly auto-assigned.
