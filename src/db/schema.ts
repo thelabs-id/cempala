@@ -4,13 +4,17 @@
 // REQUIREMENTS.md §5 for column-level documentation. Idempotent: every
 // CREATE uses IF NOT EXISTS so migrations can be re-run.
 
-export const SCHEMA_VERSION = 1;
-
 export const SCHEMA_SQL = `
--- Five tables per REQUIREMENTS.md §5.
-CREATE TABLE IF NOT EXISTS schema_version (
-  version INTEGER NOT NULL PRIMARY KEY
-);
+-- Five tables per REQUIREMENTS.md §5: agents, messages, tasks,
+-- approved_paths, audit_log. (schema_version was a 6th metadata table in
+-- a previous iteration; it was unused and has been removed to keep the
+-- table count honest with the spec.)
+--
+-- The DROP TABLE below is a no-op on fresh databases and a one-time
+-- cleanup on databases created by older builds that had the metadata
+-- table. Without it, those DBs would keep the orphan table forever
+-- even though the constant that used to populate it
+-- (SCHEMA_VERSION) is gone.
 
 CREATE TABLE IF NOT EXISTS agents (
   id            TEXT NOT NULL PRIMARY KEY,
@@ -79,6 +83,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp
   ON audit_log(timestamp);
+
+-- Drop the now-unused metadata table from older builds. Idempotent:
+-- no-op on DBs that never had it.
+DROP TABLE IF EXISTS schema_version;
 
 -- Idempotent seed for the two agents we ship wired up (FR/AC mention
 -- "claude" and "codex" as the v1 set). NG2 limits v1 to two; this is the

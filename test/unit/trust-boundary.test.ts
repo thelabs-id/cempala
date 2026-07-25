@@ -79,6 +79,48 @@ describe("evaluateTrustBoundary", () => {
     });
     expect(v.kind).toBe("denied");
   });
+
+  test("P1: cwd=~ (home) is needs_approval because it is a strict ancestor of a denylist root", () => {
+    // Without the ancestor check, cwd=~ would be classified as
+    // `allowed (reason: home)` even though it contains ~/.ssh as a
+    // subpath. With the fix, the trust boundary asks the human to
+    // confirm the broad scope rather than silently allowing the child
+    // to access ~/.ssh.
+    const v = evaluateTrustBoundary({
+      cwd: HOME,
+      pathDenylist: PATH_DENYLIST,
+      approvedRoots: [],
+    });
+    expect(v.kind).toBe("needs_approval");
+    if (v.kind === "needs_approval") {
+      expect(v.reason).toBe("ancestor_of_denylist");
+    }
+  });
+
+  test("P1: cwd=~ with HOME approved still needs_approval (denylist wins, ancestor check wins over approved)", () => {
+    // Even if the user has approved `~`, the ancestor-of-denylist
+    // check fires BEFORE the approved-root check. The user must
+    // narrow their cwd to a subdirectory, not approve home wholesale.
+    const v = evaluateTrustBoundary({
+      cwd: HOME,
+      pathDenylist: PATH_DENYLIST,
+      approvedRoots: [HOME],
+    });
+    expect(v.kind).toBe("needs_approval");
+    if (v.kind === "needs_approval") {
+      expect(v.reason).toBe("ancestor_of_denylist");
+    }
+  });
+
+  test("P1: a subpath of home that does NOT contain a denylist root is still allowed (no regression)", () => {
+    const v = evaluateTrustBoundary({
+      cwd: join(HOME, "projects", "myapp"),
+      pathDenylist: PATH_DENYLIST,
+      approvedRoots: [],
+    });
+    expect(v.kind).toBe("allowed");
+    if (v.kind === "allowed") expect(v.reason).toBe("home");
+  });
 });
 
 describe("canApprove (FR-7a / AC-10)", () => {
@@ -96,5 +138,15 @@ describe("canApprove (FR-7a / AC-10)", () => {
   test("AC-10: a subpath of a denylisted path cannot be approved", () => {
     const v = canApprove(join(HOME, ".ssh", "id_rsa"), PATH_DENYLIST);
     expect(v.ok).toBe(false);
+  });
+
+  test("P1: an ancestor of a denylist root cannot be approved (symmetric to evaluateTrustBoundary)", () => {
+    // `HOME` is not on the denylist itself, but it contains
+    // `~/.ssh` as a subpath. Approving HOME would let a future
+    // dispatch with `cwd: ~` slip past the denylist. Symmetric to
+    // the ancestor check in `evaluateTrustBoundary`.
+    const v = canApprove(HOME, PATH_DENYLIST);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).toBe("contains_denylist");
   });
 });

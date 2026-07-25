@@ -54,11 +54,15 @@ const WEB_TOOLS = ["WebFetch", "WebSearch"] as const;
  * guarantee violation — the reported label would lie. Rejecting the flag
  * at config-load time keeps the label honest.
  *
- * Finally we block Codex's `--add-dir` (P1 fix). `--add-dir /` or
+ * Finally we block `--add-dir` for BOTH clis (P1 fix). `--add-dir /` or
  * `--add-dir <other-cwd>` would widen the sandbox beyond the validated
  * `cwd`, violating FR-14's cwd-anchored scope. The spec scopes writes
  * to the task's cwd; `--add-dir` is the documented escape hatch from
- * that scope and we treat it as a bypass.
+ * that scope on both Codex and Claude and we treat it as a bypass on
+ * either CLI. Claude's `--add-dir` (shown by `claude --help` as
+ * `--add-dir <directories...>`) was previously missing from this list,
+ * letting a config add Claude cwd-widening without config-load
+ * rejection.
  */
 const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: "codex" | "claude" | "any"; needle: string }> = [
   // Codex (FR-14 table)
@@ -67,8 +71,12 @@ const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: "codex" | "claude" | "any"; needle
   { cli: "codex", needle: "dangerously-bypass-hook-trust" },
   // Codex network-enable config key (FR-13)
   { cli: "codex", needle: "network_access=true" },
-  // Codex sandbox-widening (FR-14 cwd-anchored scope)
-  { cli: "codex", needle: "--add-dir" },
+  // Sandbox-widening (FR-14 cwd-anchored scope) — applies to BOTH CLIs.
+  // `cli: "any"` is correct: the documented `claude --help` shows
+  // `--add-dir <directories...>` and codex has the same flag with the
+  // same purpose. Banning it on one but not the other would let a
+  // single agent bypass the cwd scope.
+  { cli: "any", needle: "--add-dir" },
   // Claude (FR-14 table). Each forbidden flag has its own needle; we
   // also include a "dangerously-skip-permissions" fragment so
   // `--allow-dangerously-skip-permissions` is caught (the flag name
@@ -137,12 +145,16 @@ export interface ResolvedArgv {
  * always-applied baseline. We deliberately do NOT honor any
  * `sandbox_args` override in user config for the actual sandbox flag,
  * because that would let a TOML edit silently weaken the spec's
- * narrowest-scope guarantee. The config key is retained for the rare
- * case where a user wants to add additional non-sandbox flags
- * (e.g. `--add-dir` for legitimate cross-dir work), but the
- * `--sandbox workspace-write` itself is always prepended from the
- * compile-time baseline. If the user-supplied `sandbox_args` is
- * missing or empty, behavior is unchanged.
+ * narrowest-scope guarantee. The config key is accepted for parsing
+ * compatibility (so users can keep their existing toml without
+ * breaking `cempala --init`), but its content is NOT appended to the
+ * dispatch argv. The compile-time baseline is the single source of
+ * truth for `--sandbox`/`--permission-mode`; everything else in
+ * `sandbox_args` is also redundant with the broader FR-14 forbidden
+ * list (e.g. `--add-dir` for cwd scope, `danger-full-access` for
+ * sandbox widening), so the config key's remaining utility is
+ * effectively zero. We keep the field rather than remove it so old
+ * configs don't fail to parse.
  */
 export function resolveCodexArgv(
   cfg: AppConfig,

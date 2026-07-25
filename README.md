@@ -49,7 +49,7 @@ The script is idempotent — re-running it (e.g. to upgrade) overwrites the bina
 | `create_task` | Create a mailbox task; validates `cwd` against the trust boundary. | FR-3 |
 | `claim_task` | Claim a pending task; fails for non-`pending` states. | FR-4 |
 | `complete_task` | Mark a claimed/running task `completed` or `failed`. | FR-5 |
-| `dispatch` | Synchronously run a prompt in the target agent's CLI; returns the result or `running` at the wait timeout. | FR-6 |
+| `dispatch` | Synchronously run a prompt in the target agent's CLI; returns the result or `running` at the wait timeout. `needs_approval` results carry a `reason` (`"outside_home"` or `"ancestor_of_denylist"`) so the caller can tell "approve this path" from "narrow the cwd". | FR-6 |
 | `check_task` | Read current task state; reconciles a `running` task whose process has died. | FR-7 |
 | `approve_path` | Persist a path outside the home into `approved_paths`. Denylisted paths cannot be approved. | FR-7a |
 
@@ -60,12 +60,14 @@ Every call is logged to `audit_log` with timing, args, and a short result summar
 - **Default trust boundary** = your home directory (`os.homedir()`), zero config. (FR-11)
 - **Baseline denylist** of sensitive roots under home (`.ssh`, `.aws`, `.gnupg`, `.docker`, `.config/gh`, browser credential stores, etc.) is **always** applied. Your `config.toml` can only *add* entries. (FR-11a)
 - **Outside-home paths** return `needs_approval`, not an error. The calling agent relays this to the human; only after a `approve_path` call does a retry succeed. (FR-11b / FR-11c)
-- **Even `approve_path`** refuses denylisted paths — there is no escalation path that lets a denylisted path become approved. (AC-10)
+- **Cwd that is a strict ancestor of a denylist root** (e.g. `cwd: "~"`, which contains `~/.ssh` as a subpath) also returns `needs_approval`, with `reason: "ancestor_of_denylist"`. The escalation path here is *not* `approve_path` (the home directory cannot be approved as a whole — `canApprove` rejects it) but to **narrow the cwd** to a project subdirectory. This is symmetric to the "denylist wins" rule: a cwd broad enough to contain a denylist subpath would let the child access it, so the trust boundary forces explicit human confirmation rather than silently allowing the broad scope.
+- **Even `approve_path`** refuses denylisted paths and their ancestors — there is no escalation path that lets a denylisted path become approved. (AC-10)
 - **Path containment** uses one canonicalization routine (resolve symlinks → absolutize → normalize → Windows case-fold → `X === Y || X.startsWith(Y + sep)`). Sibling-prefix matches like `D:\clients\acme2` against root `D:\clients\acme` are excluded. (AC-11)
 - **Symlinks inside an approved directory** that point at `~/.ssh` are still caught, because the canonicalization resolves the symlink before matching. (AC-12)
 - **Sandbox scope** is set per agent CLI per dispatch:
   - Codex → `--sandbox workspace-write` (with `-c sandbox_workspace_write.network_access=true` only when `allow_network: true`). Egress is **OS-sandbox-enforced**.
   - Claude → `--tools "<baseline + WebFetch + WebSearch if allow_network>"` with `--disallowedTools "WebFetch,WebSearch"` only when `allow_network: false`. The web tools are removed, but Claude's `Bash` can still `curl`; the dispatch result reports this honestly as `network_enforcement: "tools_only"` rather than the stronger `"sandboxed"` (which only Codex gets).
+- **`--add-dir`** is forbidden for both Codex and Claude — it's the documented escape hatch from the cwd-anchored scope on either CLI, and any `config.toml` that introduces it is rejected at config load time.
 
 ## Configuration
 
@@ -104,7 +106,7 @@ All paths may use `~/` — `config.ts` expands against `os.homedir()` on read. T
 ```sh
 bun install
 bun run src/index.ts        # run the server (for manual testing)
-bun test test/unit          # 78 unit tests across 10 files
+bun test test/unit          # 140 unit tests across 10 files
 CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude
 bun x tsc --noEmit          # typecheck
 bun build --compile src/index.ts --outfile dist/cempala.exe

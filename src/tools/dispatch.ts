@@ -39,17 +39,32 @@ export interface DispatchInput {
   target_agent: "codex" | "claude";
   prompt: string;
   cwd: string;
-  wait_seconds?: number;
+  // Optional fields can be `null` from the MCP wire format (the schema
+  // advertises `["X", "null"]` for these). The runtime treats
+  // `undefined` ("field omitted") and `null` ("field present, but
+  // unset") the same way, so we accept both here. Mismatching the
+  // schema would either let nulls slip through untyped (a TS escape
+  // hatch) or block the valid null form.
+  wait_seconds?: number | null;
   allowed_tools?: string[] | null;
-  allow_network?: boolean;
-  created_by?: string;
+  allow_network?: boolean | null;
+  created_by?: string | null;
 }
 
 export type DispatchOutput =
   | { status: "completed"; result: string; exit_code: number; task_id: string; network_enforcement: NetworkEnforcement }
   | { status: "failed"; result: string; exit_code: number | null; task_id: string; network_enforcement: NetworkEnforcement }
   | { status: "running"; task_id: string; network_enforcement: NetworkEnforcement }
-  | { status: "needs_approval"; path: string; task_id: string };
+  // `reason` distinguishes the two needs_approval cases so the calling
+  // agent can present a useful message and a useful next step:
+  //   - "outside_home": the cwd is outside the home directory and not
+  //     covered by an approved root. The user can `approve_path` to
+  //     allow this specific location.
+  //   - "ancestor_of_denylist": the cwd contains a denylist root
+  //     (e.g. `cwd: ~` contains `~/.ssh`) as a subpath. Approval is
+  //     not possible; the user must NARROW the cwd to a subdirectory
+  //     that is not a denylist ancestor.
+  | { status: "needs_approval"; path: string; task_id: string; reason: "outside_home" | "ancestor_of_denylist" };
 
 export async function dispatch(
   db: DB,
@@ -63,6 +78,22 @@ export async function dispatch(
     return { ok: false, error: `unsupported target_agent '${input.target_agent}'`, code: "invalid_input" };
   }
 
+  // Runtime type check for `wait_seconds` (P1 fix). The schema
+  // advertises `["number", "null"]` but the MCP wire format doesn't
+  // enforce that, so a caller could send `"5"` (string) or `NaN`. The
+  // schema-side type narrowing would silently let `clampWait` produce
+  // a `NaN` deadline, which means "wait forever" — and the child
+  // never times out, so the dispatch hangs at the FR-15 hard ceiling.
+  if (input.wait_seconds !== undefined && input.wait_seconds !== null) {
+    if (typeof input.wait_seconds !== "number" || !Number.isFinite(input.wait_seconds)) {
+      return {
+        ok: false,
+        error: `wait_seconds must be a finite number (got ${typeof input.wait_seconds})`,
+        code: "invalid_input",
+      };
+    }
+  }
+
   // created_by tracks the caller's identity for the audit row (G2) and
   // for the FK. We don't accept a hard-coded fallback to "claude" —
   // the reverse handoff path (Codex → Claude) is a documented v1
@@ -70,6 +101,21 @@ export async function dispatch(
   // this file."), and silently misattributing those rows to Claude
   // would break the ownership trail. If the caller doesn't supply
   // created_by, we leave it null in the row and skip the FK seed.
+  //
+  // Empty string is rejected (P1 fix): the type check above accepts
+  // it as a valid string, but `ensureAgent("")` would no-op (the
+  // truthy check below) and the FK insert would then fail with
+  // FOREIGN KEY constraint. The user gets a clearer error here than
+  // a raw SQL exception bubbled out of the tool boundary.
+  if (input.created_by !== undefined && input.created_by !== null) {
+    if (typeof input.created_by !== "string" || input.created_by.length === 0) {
+      return {
+        ok: false,
+        error: `created_by must be a non-empty string (got ${JSON.stringify(input.created_by)})`,
+        code: "invalid_input",
+      };
+    }
+  }
   const createdBy = input.created_by;
   if (createdBy) ensureAgent(db, createdBy);
 
@@ -188,7 +234,11 @@ export async function dispatch(
     db.run(`UPDATE tasks SET status = 'needs_approval' WHERE id = ?`, [id]);
     return {
       ok: true,
-      data: { status: "needs_approval", path: validatedCwd, task_id: id },
+      // Pass through the verdict's reason so the caller can tell
+      // "approve this path" from "narrow the cwd" (FR-11b is
+      // structurally `needs_approval`, but the escalation path
+      // differs by case).
+      data: { status: "needs_approval", path: validatedCwd, task_id: id, reason: verdict.reason },
     };
   }
 
@@ -347,7 +397,7 @@ function scheduleBackgroundReconcile(
 /** FR-15 hard ceiling, independent of any config override. */
 const HARD_MAX_WAIT_SECONDS = 600;
 
-function clampWait(requested: number | undefined, def: number, cap: number): number {
+function clampWait(requested: number | null | undefined, def: number, cap: number): number {
   // FR-15: 600 is a hard ceiling, not a default — it is enforced
   // regardless of what the user has set in config. The config's
   // max_wait_seconds caps the *requested* value, and the hard ceiling

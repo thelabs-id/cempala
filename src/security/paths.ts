@@ -116,6 +116,23 @@ export function isSameOrUnder(X: string, Y: string): boolean {
   return isInside(X, Y) || isInside(Y, X);
 }
 
+/**
+ * Strict ancestor: `Y` is a strict descendant of `X` — i.e. `Y` is inside
+ * `X`, but `X ≠ Y`. Used to detect "X is a broad scope that contains a
+ * sensitive subpath". The strictness matters: a cwd that IS a denylist
+ * root is caught by the containment check (returns `denied`); this helper
+ * is for cwds that CONTAIN a denylist root as a subpath, which containment
+ * alone misses (a bare `isInside(denylist, cwd)` would return true, but
+ * `isInside(denylist, denylist)` would also return true — collapsing two
+ * different cases into one).
+ */
+export function isStrictAncestorOf(X: string, Y: string): boolean {
+  const cx = canonicalize(X);
+  const cy = canonicalize(Y);
+  if (cx === cy) return false; // not strict
+  return isInside(cy, cx);
+}
+
 function exists(p: string): boolean {
   try {
     statSync(p);

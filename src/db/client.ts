@@ -12,7 +12,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.ts";
+import { SCHEMA_SQL } from "./schema.ts";
 
 export type SqlParam = SQLQueryBindings | null | undefined;
 export type SqlParams = SqlParam[];
@@ -53,11 +53,6 @@ export function openDatabase(dbPath: string): DB {
   // bound — typical writes are sub-millisecond.
   raw.exec("PRAGMA busy_timeout = 5000;");
   raw.exec(SCHEMA_SQL);
-
-  // Record/refresh the schema version row.
-  raw.run("INSERT OR REPLACE INTO schema_version(version) VALUES (?)", [
-    SCHEMA_VERSION,
-  ]);
 
   const db: DB = {
     raw,
