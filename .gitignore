@@ -26,3 +26,12 @@ test-mcp.ts
 # Cempala local state (intentionally — see AGENTS.md §10: deleting ~/.cempala
 # fully resets the system; this also covers the per-repo test working dir)
 .cempala/
+
+# Project docs — kept on disk but not tracked in git. The source of
+# truth for the Cempala project lives in the thelabs-id org's private
+# docs repo; this checkout is a working build and these three files
+# are the public-facing mirrors. Edits made here stay local until
+# the next docs-sync pass.
+REQUIREMENTS.md
+CLAUDE.md
+AGENTS.md
