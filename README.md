@@ -173,6 +173,10 @@ See `REQUIREMENTS.md` for the full FR/NFR/AC spec, and `AGENTS.md` / `CLAUDE.md`
 
 In Indonesian *wayang* theatre, the **cempala** is the small wooden mallet the puppeteer taps to cue the musicians and signal a change of scene. Here it plays the same role: a quiet cue that gets one agent to act on another's behalf.
 
+## Disclaimer
+
+Cempala is an independent project by theLabs. It is not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are products of Anthropic; Codex and Codex CLI are products of OpenAI. Those names and trademarks belong to their respective owners, and are used here only to describe the tools Cempala works with.
+
 ## License
 
 See [`LICENSE`](LICENSE).
