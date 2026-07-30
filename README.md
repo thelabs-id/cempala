@@ -73,7 +73,13 @@ If either prints an authentication error instead of `OK`, sign that CLI in — `
 
 ## Install
 
-> **Windows only for now.** `v0.1.0` publishes a Windows build, because that is the platform it has been smoke-tested on. The macOS and Linux binaries cross-compile cleanly and their installer is written and ready, but they aren't published until each has been run on real hardware — so the `curl` command below will fail until then. Cempala is not macOS/Linux-incompatible; those builds are simply unverified, and shipping a binary nobody has run is not a favour to anyone.
+> **`v0.1.0` publishes Windows x64 and Linux x64.** A target isn't published until the binary has actually been run on the platform it targets — a cross-compile that succeeds proves nothing about the artifact. macOS and `linux-arm64` cross-compile cleanly and are covered by the same installer; they'll ship once CI has smoke-tested them on real hardware. They're unverified, not incompatible.
+
+Linux (x64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.sh | bash
+```
 
 Windows (PowerShell):
 
@@ -83,11 +89,7 @@ irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.ps
 
 On Windows on ARM the installer fetches the x64 build, which runs under emulation. A native ARM64 binary is built but not yet published, for the same reason.
 
-macOS / Linux — *not yet published, see the note above:*
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.sh | bash
-```
+macOS, and Linux on ARM — *not yet published, see the note above.*
 
 Both installers:
 - detect OS + arch and download the matching pre-compiled binary
