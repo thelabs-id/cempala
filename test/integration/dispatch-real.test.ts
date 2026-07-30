@@ -19,6 +19,30 @@ import { sweepStaleTasks } from "../../src/reaper.ts";
 
 const SKIP_REASON = "set CEMPALA_INTEGRATION=1 to run integration tests (require codex + claude on PATH)";
 
+/**
+ * Kill a process AND its descendants.
+ *
+ * `process.kill(pid)` alone is not enough for these tests: on Windows the
+ * recorded pid is an npm .cmd shim, and killing only the shim leaves the real
+ * agent running — which is the whole reason the false-failure bug existed. A
+ * test that wants the agent genuinely gone has to take the tree with it.
+ */
+function killTree(pid: number): void {
+  if (process.platform === "win32") {
+    try {
+      Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+      return;
+    } catch {
+      // Fall through to the POSIX-style kill below.
+    }
+  }
+  try {
+    process.kill(pid, 9);
+  } catch {
+    // Already gone.
+  }
+}
+
 describe.skipIf(!INTEGRATION_ENABLED)("integration: dispatch (AC-1, AC-2, AC-5, AC-6, AC-9)", () => {
   test("AC-1: codex generates a 512x512 blue circle PNG (allow_network=false)", async () => {
     const env = makeIntEnv();
@@ -135,12 +159,37 @@ module.exports = { add, sub };
       const row = env.db.get<{ pid: number | null }>(`SELECT pid FROM tasks WHERE id = ?`, [taskId]);
       expect(row?.pid).toBeGreaterThan(0);
       if (!row?.pid) throw new Error("no pid");
-      // Kill the child.
-      try { process.kill(row.pid, 9); } catch { /* ignore */ }
-      // check_task should reconcile it.
+
+      // Kill the recorded process.
+      //
+      // This test used to assert that check_task turned the row `failed`
+      // immediately afterwards. That assertion encoded the false-failure bug:
+      // on Windows the recorded pid is a .cmd shim, so killing it says
+      // nothing about the agent behind it, and tasks were being reported as
+      // failed while the agent went on to finish the work successfully.
+      //
+      // The corrected contract is that a no-longer-live task reaches a
+      // terminal state that matches reality — never a false one, and never
+      // `running` forever. So: kill the whole tree (so the agent really is
+      // gone, not just its launcher), require that nothing claims success,
+      // and then drive the reaper's own clock past the stale window to prove
+      // the row does get cleared. FR-17 is what bounds this; the timing
+      // behavior in between is covered deterministically by the unit tests.
+      killTree(row.pid);
+
       const chk = checkTask(env.db, { task_id: taskId });
       expect(chk.ok).toBe(true);
-      if (chk.ok) expect(chk.data.status).toBe("failed");
+      // Whatever it says now, it must not claim the run succeeded.
+      if (chk.ok) expect(chk.data.status).not.toBe("completed");
+
+      // Advance the sweep's clock past FR-17's window.
+      sweepStaleTasks(env.db, Date.now() + 31 * 60 * 1000);
+      const after = env.db.get<{ status: string; exit_code: number | null }>(
+        `SELECT status, exit_code FROM tasks WHERE id = ?`,
+        [taskId],
+      );
+      expect(after?.status).toBe("failed");
+      expect(after?.exit_code).not.toBeNull();
     } finally { env.cleanup(); }
   }, { timeout: 120_000 });
 
@@ -192,6 +241,77 @@ module.exports = { add, sub };
         created_by: "claude",
       });
       expect(r3.ok && r3.data.status).toBe("completed");
+    } finally { env.cleanup(); }
+  }, { timeout: 600_000 });
+
+  test("FR-7: a real agent orphaned by a dead recorded pid is not reported as failed", async () => {
+    // The regression this guards is a false FAILURE: a dispatch outlived the
+    // cempala server, the recorded pid died (on Windows it is a .cmd shim,
+    // not the agent), and check_task called the task `failed` with exit -1
+    // while the agent went on to finish the work successfully.
+    //
+    // This needs the real CLI: the behavior depends on the actual shim shape
+    // the agent ships with, which no synthetic .cmd reproduces faithfully —
+    // hence it lives here rather than in the unit suite.
+    const env = makeIntEnv();
+    try {
+      const marker = join(env.homeCwd, "orphan-proof.txt");
+      const r = await dispatch(env.db, env.cfg, {
+        target_agent: "codex",
+        prompt:
+          "Write the text 'orphan survived' to " + marker + " using a shell command, then reply DONE.",
+        cwd: env.homeCwd,
+        allow_network: false,
+        // Short on purpose: return while the agent is still working, so the
+        // reconcile path is what decides the outcome.
+        wait_seconds: 2,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok || r.data.status !== "running") {
+        throw new Error(`expected running, got ${JSON.stringify(r.ok ? r.data : r)}`);
+      }
+      const taskId = r.data.task_id;
+
+      // Kill the recorded pid outright. That is what the server exiting does
+      // to the shim, and it is the exact condition that used to produce the
+      // false failure.
+      const row = env.db.get<{ pid: number | null }>(`SELECT pid FROM tasks WHERE id = ?`, [taskId]);
+      if (row?.pid) {
+        try {
+          process.kill(row.pid, 9);
+        } catch {
+          // Already gone — the scenario we care about either way.
+        }
+      }
+
+      // Poll until it reaches a terminal state. It must never land on
+      // `failed` while the agent is still producing work.
+      const deadline = Date.now() + 240_000;
+      let final = checkTask(env.db, { task_id: taskId });
+      while (Date.now() < deadline) {
+        final = checkTask(env.db, { task_id: taskId });
+        if (!final.ok) throw new Error("check_task failed");
+        if (final.data.status !== "running") break;
+        await Bun.sleep(3000);
+      }
+      if (!final.ok) throw new Error("check_task failed");
+
+      // Whatever the platform did to the orphan, the recorded outcome must
+      // match reality.
+      if (existsSync(marker)) {
+        // The agent survived and did the work — this is a success, and
+        // reporting it as `failed` is the exact regression being guarded.
+        expect(readFileSync(marker, "utf-8")).toContain("orphan survived");
+        expect(final.data.status).toBe("completed");
+        expect(final.data.exit_code).toBe(0);
+        expect(final.data.result).toContain("DONE");
+      } else {
+        // The agent was killed with its launcher. That is a legitimate
+        // outcome on platforms where the shim takes its child down — but it
+        // must never be reported as a success.
+        expect(final.data.status).not.toBe("completed");
+      }
     } finally { env.cleanup(); }
   }, { timeout: 600_000 });
 });

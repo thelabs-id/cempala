@@ -31,6 +31,8 @@ import { evaluateTrustBoundary } from "../security/trust-boundary.ts";
 import { effectivePathDenylist, matchPromptDenylist, matchAbsolutePathDenylist } from "../security/denylist.ts";
 import { canonicalize } from "../security/paths.ts";
 import { resolveAgentArgv, type NetworkEnforcement } from "./agent-args.ts";
+import { parseAgentOutput } from "./agent-output.ts";
+import { assessTask, ACTIVITY_GRACE_MS } from "./task-liveness.ts";
 import { spawnDetached, isAlive, makeOutputFile } from "../platform/spawn.ts";
 import type { Result } from "./send-message.ts";
 import { ensureAgent } from "./send-message.ts";
@@ -277,7 +279,7 @@ export async function dispatch(
       data: { status: "failed", result: `spawn failed: ${msg}`, exit_code: -1, task_id: id, network_enforcement: resolved.network_enforcement },
     };
   }
-  db.run(`UPDATE tasks SET pid = ? WHERE id = ?`, [handle.pid, id]);
+  db.run(`UPDATE tasks SET pid = ?, pid_is_agent = ? WHERE id = ?`, [handle.pid, handle.pidIsAgent ? 1 : 0, id]);
 
   // Step 3: bounded wait. We do NOT kill on timeout — the child keeps
   // running and `check_task` is the only path to its eventual result.
@@ -285,46 +287,44 @@ export async function dispatch(
   const deadline = Date.now() + waitSeconds * 1000;
 
   const outcome = await waitForExit(handle, deadline);
-  if (outcome.kind === "exited") {
+  if (outcome.kind === "exited" && exitIsAuthoritative(handle, outFile)) {
     // Parse the result from the output file. We keep this tolerant:
     // if the output isn't parseable as JSON, surface the raw stdout.
     // For failed runs we ALSO read the stderr sibling (P2 fix):
     // many CLIs print auth/usage errors to stderr only, and we
     // don't want the caller to see an empty result for those.
     const out = readOutputFile(outFile);
-    const parsed = tryParseJson(out);
-    const resultText = parsed
-      ? (typeof parsed === "object" && parsed && "result" in parsed
-          ? String((parsed as Record<string, unknown>).result ?? "")
-          : JSON.stringify(parsed))
-      : out;
-    const ok = outcome.exitCode === 0;
-    let finalResult = resultText;
+    const parsed = parseAgentOutput(out);
+    const { exitCode, ok } = judgeOutcome(outcome.exitCode, parsed.inferredExitCode, handle.pidIsAgent);
+    let finalResult = parsed.resultText;
     if (!ok) {
       const errText = readOutputFile(handle.stderrFile).trim();
-      if (errText && !resultText) {
+      if (errText && !finalResult) {
         finalResult = errText;
       } else if (errText) {
-        finalResult = `${resultText}\n\nstderr:\n${errText}`;
+        finalResult = `${finalResult}\n\nstderr:\n${errText}`;
       }
     }
     const finalStatus = ok ? "completed" : "failed";
     db.run(
       `UPDATE tasks SET status = ?, result = ?, exit_code = ?, completed_at = ? WHERE id = ?`,
-      [finalStatus, finalResult, outcome.exitCode, Date.now(), id],
+      [finalStatus, finalResult, exitCode, Date.now(), id],
     );
     return {
       ok: true,
       data: {
         status: finalStatus,
         result: finalResult,
-        exit_code: outcome.exitCode,
+        exit_code: exitCode,
         task_id: id,
         network_enforcement: resolved.network_enforcement,
       },
     };
   }
-  // Still running at the timeout boundary — do NOT kill, just report.
+  // Either still running at the timeout boundary, or the process we spawned
+  // is gone but was only a launcher and the agent behind it is still working
+  // (see exitIsAuthoritative). Both mean the same thing to the caller: the
+  // task continues. Do NOT kill, just report.
   // But: schedule a background reconciliation so that when the child
   // eventually exits, the task row is updated with the real exit code
   // and result. Without this, a child that completes successfully
@@ -358,20 +358,27 @@ function scheduleBackgroundReconcile(
   // Use the handle's `exited` promise as the trigger. We don't unref
   // because the child itself keeps the runtime alive; this callback
   // resolves alongside the child and the runtime exits naturally.
-  handle.exited.then((exitCode) => {
+  handle.exited.then((rawExitCode) => {
     try {
+      // The process we spawned is gone, but that is only the task's ending if
+      // it was the agent itself — see exitIsAuthoritative. Recording a killed
+      // shim's exit status here would be the same false failure by a
+      // different route. Hand off to the watcher instead: `exited` has
+      // already fired and will never fire again, so without it nothing would
+      // be left following the run.
+      if (!exitIsAuthoritative(handle, outFile)) {
+        watchOrphanedRun(db, taskId, handle, outFile, rawExitCode);
+        return;
+      }
       const out = readOutputFile(outFile);
-      const parsed = tryParseJson(out);
-      let resultText = parsed
-        ? (typeof parsed === "object" && parsed && "result" in parsed
-            ? String((parsed as Record<string, unknown>).result ?? "")
-            : JSON.stringify(parsed))
-        : out;
+      const parsed = parseAgentOutput(out);
+      const { exitCode, ok } = judgeOutcome(rawExitCode, parsed.inferredExitCode, handle.pidIsAgent);
+      let resultText = parsed.resultText;
       // For failed runs, also read the stderr sibling (P2 fix). Many
       // CLIs print auth/usage errors to stderr only — without this
       // step, the task row would say "failed" with an empty result
       // and the caller would have no actionable error.
-      if (exitCode !== 0) {
+      if (!ok) {
         const errText = readOutputFile(handle.stderrFile).trim();
         if (errText && !resultText) {
           resultText = errText;
@@ -379,7 +386,7 @@ function scheduleBackgroundReconcile(
           resultText = `${resultText}\n\nstderr:\n${errText}`;
         }
       }
-      const finalStatus = exitCode === 0 ? "completed" : "failed";
+      const finalStatus = ok ? "completed" : "failed";
       // Only update if the row is still "running" — the reaper may have
       // swept it as a stale task in the meantime, in which case we
       // leave the sweep's "failed" verdict alone.
@@ -392,6 +399,167 @@ function scheduleBackgroundReconcile(
       // Swallow — a background update that fails shouldn't bubble up.
     }
   }).catch(() => { /* ignore */ });
+}
+
+/** How often the orphan watcher re-reads the output file. */
+const ORPHAN_POLL_MS = 5_000;
+
+/**
+ * Keep following a run whose launcher has exited but whose agent is still
+ * working (the `exitIsAuthoritative` false case).
+ *
+ * This exists because `exited` is a one-shot: it has already fired by the
+ * time we know to defer, and it will never fire again for the orphan behind
+ * the shim. Without something watching, a task that finishes seconds later
+ * would sit at `running` until a caller happened to poll `check_task` or the
+ * reaper's sweep came round half an hour later — abandoning dispatch's
+ * promise that a timed-out task settles its own row when the work finishes.
+ *
+ * The watcher reads the output on exactly the terms task-liveness uses, and
+ * stops at the reaper's window: past that point the sweep is the backstop and
+ * a lingering timer would add nothing. The timer is unref'd, so it can never
+ * hold the server process open.
+ */
+function watchOrphanedRun(
+  db: DB,
+  taskId: string,
+  handle: ReturnType<typeof spawnDetached>,
+  outFile: string,
+  /**
+   * The launcher's own exit status, kept so it is not thrown away by
+   * deferring. If the run ends up abandoned — nothing behind the launcher
+   * ever produced a verdict — this was the most specific thing we ever
+   * learned about why, and reporting a bare -1 instead would discard, say,
+   * the exit 9 of a shim that died on a bad argument.
+   */
+  launcherExitCode: number,
+): void {
+  const giveUpAt = Date.now() + ACTIVITY_GRACE_MS;
+
+  const schedule = () => {
+    const timer = setTimeout(tick, ORPHAN_POLL_MS);
+    // Bun/Node timers expose unref(); guard anyway so a runtime without it
+    // degrades to "server waits for the timer" rather than crashing.
+    (timer as { unref?: () => void }).unref?.();
+  };
+
+  function tick(): void {
+    try {
+      // Someone else may have settled the row (check_task, or the reaper).
+      const row = db.get<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [taskId]);
+      if (!row || row.status !== "running") return;
+
+      // `pid: null` — the recorded process is gone; only the output can speak.
+      const liveness = assessTask({ pid: null, outputFile: outFile });
+      if (liveness.state !== "running") {
+        const exitCode =
+          liveness.state === "finished"
+            ? liveness.exitCode
+            : launcherExitCode !== 0
+              ? launcherExitCode
+              : -1;
+        const ok = exitCode === 0;
+        let resultText =
+          liveness.state === "finished"
+            ? liveness.resultText
+            : parseAgentOutput(readOutputFile(outFile)).resultText;
+        if (!ok) {
+          const errText = readOutputFile(handle.stderrFile).trim();
+          if (errText && !resultText) {
+            resultText = errText;
+          } else if (errText) {
+            resultText = `${resultText}\n\nstderr:\n${errText}`;
+          }
+        }
+        db.run(
+          `UPDATE tasks SET status = ?, result = ?, exit_code = ?, completed_at = ?
+            WHERE id = ? AND status = 'running'`,
+          [ok ? "completed" : "failed", resultText, exitCode, Date.now(), taskId],
+        );
+        return;
+      }
+
+      if (Date.now() >= giveUpAt) return; // the reaper owns it from here.
+      schedule();
+    } catch {
+      // Background work must never throw past this point.
+    }
+  }
+
+  schedule();
+}
+
+/**
+ * Whether the spawned process exiting actually means the TASK ended.
+ *
+ * Usually yes — the process we spawned is the agent. The exception is a
+ * Windows .cmd shim (platform/spawn.ts), where the pid belongs to a launcher
+ * standing in front of the agent. Killing that shim — which is what happens
+ * when this server exits, and what an external `taskkill` does — makes
+ * `exited` resolve with the SHIM's status while the agent it launched carries
+ * on working. Treating that as the task's outcome reports `failed` for work
+ * that then completes successfully: the same false failure task-liveness.ts
+ * exists to prevent, arriving by a different route.
+ *
+ * So for a shim, whether the exit is the ending is precisely the liveness
+ * question — and it is asked of the one module that answers it, rather than
+ * re-derived here. An earlier version did re-derive it, from stdout alone,
+ * and that was wrong in a way worth recording: a shim dying while its agent
+ * had so far written only to stderr looked "not an agent stream" and was
+ * taken as authoritative, so the still-running dispatch process failed a task
+ * that check_task — which does read stderr — would have kept running. Two
+ * code paths disagreeing about identical output is the bug generator this
+ * whole area keeps producing; there is one policy, in task-liveness.ts.
+ */
+function exitIsAuthoritative(handle: ReturnType<typeof spawnDetached>, outFile: string): boolean {
+  if (handle.pidIsAgent) return true;
+  // `pid: null` on purpose — the recorded process is already gone, so the
+  // question is only whether anything is still producing output.
+  return assessTask({ pid: null, outputFile: outFile }).state !== "running";
+}
+
+/**
+ * Combine the OS exit status with the verdict the agent wrote into its own
+ * output, and decide the task's outcome.
+ *
+ * A process exit code of 0 is not by itself proof of success: `claude -p
+ * --output-format json` reports API-level failures (an expired OAuth token,
+ * for instance) as `is_error: true` in its result envelope, and a CLI that
+ * paired that with a 0 exit would otherwise be recorded as `completed` with
+ * an error message sitting in the result field.
+ *
+ * This also keeps the two reconciliation paths honest with each other. The
+ * restart path (check_task / the reaper) has only the output to go on and
+ * would call such a run `failed`; if this path called the very same output
+ * `completed`, the status a caller saw would depend on nothing more than
+ * whether the server happened to stay up.
+ *
+ * Which signal outranks which depends on whose exit status we actually have:
+ *
+ *   - `osExitIsAgents` true (the normal case) — a non-zero OS exit wins and
+ *     is reported verbatim; it is the more specific signal. Inference only
+ *     decides cases the exit code calls success.
+ *
+ *   - `osExitIsAgents` false — the exit status belongs to a Windows .cmd
+ *     launcher, not the agent (see platform/spawn.ts). A shim killed after
+ *     its agent already finished successfully exits non-zero, and letting
+ *     that win would report `failed` for a completed run: the same false
+ *     failure, one layer down. So when the agent has written its own verdict,
+ *     that verdict is the outcome and the launcher's status is discarded.
+ */
+function judgeOutcome(
+  osExitCode: number,
+  inferredExitCode: number | null,
+  osExitIsAgents: boolean,
+): { exitCode: number; ok: boolean } {
+  if (!osExitIsAgents && inferredExitCode !== null) {
+    return { exitCode: inferredExitCode, ok: inferredExitCode === 0 };
+  }
+  if (osExitCode !== 0) return { exitCode: osExitCode, ok: false };
+  if (inferredExitCode !== null && inferredExitCode !== 0) {
+    return { exitCode: inferredExitCode, ok: false };
+  }
+  return { exitCode: 0, ok: true };
 }
 
 /** FR-15 hard ceiling, independent of any config override. */
@@ -443,52 +611,6 @@ function readOutputFile(path: string): string {
   } catch {
     return "";
   }
-}
-
-function tryParseJson(text: string): unknown {
-  // Codex emits JSONL with multiple objects; prefer the FIRST line
-  // that carries a `result` field (the canonical final answer),
-  // falling back to the last parseable line if no `result` is
-  // present (P2 fix). Walking from the end returns whatever the
-  // last event happened to be — which for a successful run is
-  // `thread.completed` with no `result`, leaving the caller
-  // without the agent's actual answer.
-  if (!text) return null;
-  // Try parsing as a single JSON object first.
-  try {
-    const obj = JSON.parse(text);
-    if (obj && typeof obj === "object" && "result" in obj) return obj;
-  } catch {
-    // fall through
-  }
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  // First pass: any line with a `result` field.
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line);
-      if (obj && typeof obj === "object" && "result" in obj) return obj;
-    } catch {
-      // try next
-    }
-  }
-  // Second pass: any line with an `exit_code` (failed runs).
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line);
-      if (obj && typeof obj === "object" && "exit_code" in obj) return obj;
-    } catch {
-      // try next
-    }
-  }
-  // Final fallback: last parseable line (best-effort).
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      return JSON.parse(lines[i]!);
-    } catch {
-      // try next
-    }
-  }
-  return null;
 }
 
 // ensureAgent is imported from send-message.ts.

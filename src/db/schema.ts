@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   exit_code     INTEGER,
   via           TEXT NOT NULL CHECK (via IN ('mailbox','dispatch')),
   pid           INTEGER,
+  -- Whether pid is the agent itself rather than a launcher in front of it
+  -- (1/0/NULL). False only for a Windows .cmd shim — see platform/spawn.ts.
+  -- This has to be PERSISTED, not re-derived: after a server restart it is
+  -- what tells liveness whether a dead pid is conclusive proof the run ended
+  -- (the pid was the agent) or says nothing at all (it was only the shim).
+  -- NULL, from rows written by earlier builds, is read as the conservative
+  -- "not necessarily the agent".
+  pid_is_agent  INTEGER,
   output_file   TEXT,
   created_at    INTEGER NOT NULL,
   claimed_at    INTEGER,
@@ -96,3 +104,19 @@ INSERT OR IGNORE INTO agents(id, display_name, created_at) VALUES
   ('claude', 'Claude Code', 0),
   ('codex',  'Codex CLI',   0);
 `;
+
+/**
+ * Additive column migrations for databases created by earlier builds.
+ *
+ * The schema above is all `CREATE TABLE IF NOT EXISTS`, which does nothing to
+ * a table that already exists — so a new column has to be added explicitly or
+ * an upgraded cempala would fail every query mentioning it. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, hence the table_info check at the call site.
+ *
+ * Keep these additive and nullable: an older cempala should still be able to
+ * open a newer database, and two versions may well be running side by side
+ * (one registered with Claude, one with Codex).
+ */
+export const COLUMN_MIGRATIONS: ReadonlyArray<{ table: string; column: string; ddl: string }> = [
+  { table: "tasks", column: "pid_is_agent", ddl: "ALTER TABLE tasks ADD COLUMN pid_is_agent INTEGER" },
+];
