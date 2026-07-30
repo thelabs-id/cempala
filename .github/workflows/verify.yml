@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -83,9 +83,14 @@ jobs:
             asset: cempala-linux-x64
           - os: ubuntu-24.04-arm
             asset: cempala-linux-arm64
-          - os: macos-13 # Intel
+          # Runner labels for macOS move faster than you'd expect: `macos-13`
+          # is retired and `macos-14` deprecated. A retired label does not
+          # fail — the job simply queues forever, so it reads as "still
+          # running" rather than "misconfigured". Both of these are GA; check
+          # actions/runner-images before changing them.
+          - os: macos-15-intel # Intel
             asset: cempala-darwin-x64
-          - os: macos-14 # Apple Silicon
+          - os: macos-15 # Apple Silicon
             asset: cempala-darwin-arm64
           - os: windows-latest
             asset: cempala-windows-x64.exe
