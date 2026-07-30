@@ -10,7 +10,8 @@
 // resolves it before matching.
 
 import { describe, test, expect } from "bun:test";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { platform } from "node:process";
 import { canonicalize, isInside } from "../../src/security/paths.ts";
@@ -72,9 +73,23 @@ describe("security/paths.ts — isInside (AC-11)", () => {
     expect(isInside(child, root)).toBe(true);
     // The root itself: trivially inside.
     expect(isInside(root, root)).toBe(true);
-    // A path outside: not inside.
-    const outside = isWindows ? "D:\\clients" : "/tmp";
-    expect(isInside(outside, root)).toBe(false);
+    // Something OUTSIDE the root is not inside it.
+    //
+    // Windows and POSIX genuinely differ here, and the previous version of
+    // this test asserted `isInside("/tmp", "/") === false` on POSIX — which is
+    // false in the ordinary sense: /tmp really is inside /. Windows has
+    // multiple filesystem roots, so D:\ is outside C:\; POSIX has exactly one,
+    // and nothing is outside it. The test never caught this because it only
+    // ever ran on Windows. Assert the property each platform can actually
+    // express, exercising the same containment logic either way.
+    if (isWindows) {
+      expect(isInside("D:\\clients", root)).toBe(false);
+    } else {
+      expect(isInside("/tmp", "/var")).toBe(false);
+      // ...and confirm the root really does contain everything, rather than
+      // quietly skipping the negative case here.
+      expect(isInside("/tmp", "/")).toBe(true);
+    }
   });
 });
 
@@ -130,13 +145,61 @@ describe("security/denylist.ts — matchPathDenylist (AC-3, AC-10)", () => {
       try {
         const baseline = effectivePathDenylist([]);
         const hit = matchPathDenylist(linkPath, baseline);
-        expect(hit).toContain(".ssh");
+        // Only meaningful when ~/.ssh actually exists: canonicalize() resolves
+        // symlinks, and a DANGLING link cannot resolve, so there is nothing to
+        // catch. A fresh CI runner has no ~/.ssh, which made this assertion
+        // fail for a reason that had nothing to do with the security property
+        // — and it went unnoticed because the whole test skips on Windows for
+        // lack of symlink privilege. The hermetic case below is the one that
+        // always runs.
+        if (existsSync(target)) {
+          expect(hit).toContain(".ssh");
+        }
       } finally {
         try { unlinkSync(linkPath); } catch { /* ignore */ }
       }
     } catch (e) {
       if (!created) return;
       throw e;
+    }
+  });
+
+  test("AC-12 (hermetic): a symlink into any denylisted root is a hit", () => {
+    // The property AC-12 is really about — canonicalization resolves a
+    // symlink BEFORE the containment check, so a link cannot be used to reach
+    // a denylisted directory by another name.
+    //
+    // Built entirely inside a temp directory rather than against ~/.ssh, so it
+    // does not depend on the developer's home layout: the variant above is
+    // silently meaningless on a machine with no ~/.ssh, which is exactly what
+    // a fresh CI runner is.
+    const base = mkdtempSync(join(tmpdir(), "cempala-dl-"));
+    try {
+      const secrets = join(base, "secrets");
+      const link = join(base, "looks-innocent");
+      mkdirSync(secrets);
+      try {
+        symlinkSync(secrets, link, "dir");
+      } catch (e) {
+        // Windows without Developer Mode / elevation. Skip loudly rather than
+        // passing silently, per AGENTS.md §9.
+        console.warn("SKIP AC-12 (hermetic): cannot create symlink:", (e as Error).message);
+        return;
+      }
+
+      const denylist = effectivePathDenylist([secrets]);
+
+      // The symlink itself resolves into the denylisted root.
+      expect(matchPathDenylist(link, denylist)).not.toBeNull();
+      // ...and so does a path reached THROUGH it.
+      expect(matchPathDenylist(join(link, "id_rsa"), denylist)).not.toBeNull();
+      // A sibling that merely shares a prefix must NOT be a hit — the
+      // `…/secrets` vs `…/secrets2` case AC-11 cares about.
+      const sibling = join(base, "secrets2");
+      mkdirSync(sibling);
+      expect(matchPathDenylist(sibling, denylist)).toBeNull();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
