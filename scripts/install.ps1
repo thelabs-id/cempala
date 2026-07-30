@@ -17,16 +17,29 @@
 $ErrorActionPreference = "Stop"
 
 # --- 1. Detect architecture ---
+#
+# ARM64 deliberately maps to the x64 asset. A native windows-arm64 binary
+# builds fine, but per AGENTS.md section 7 a target is not a release artifact
+# until it has been smoke-tested on matching hardware, and that has not
+# happened yet -- so it is not published. Windows on ARM runs x64 binaries
+# under emulation, so pointing ARM64 machines at the verified x64 build gives
+# them something that actually works, instead of a 404 for an asset that does
+# not exist. Give ARM64 its own line here the moment a native build is
+# published and tested.
 switch ($env:PROCESSOR_ARCHITECTURE) {
-  "AMD64"  { $arch = "x64";   break }
-  "ARM64"  { $arch = "arm64"; break }
+  "AMD64"  { $arch = "x64"; break }
+  "ARM64"  { $arch = "x64"; $emulated = $true; break }
   default {
     Write-Error "error: unsupported architecture: $env:PROCESSOR_ARCHITECTURE"
     exit 1
   }
 }
 $asset = "cempala-windows-${arch}.exe"
-Write-Host "-> detected platform: windows-${arch}"
+if ($emulated) {
+  Write-Host "-> detected platform: windows-arm64; installing the x64 build (runs under emulation)"
+} else {
+  Write-Host "-> detected platform: windows-${arch}"
+}
 
 # --- 2. Locate the GitHub release tag ---
 if (-not $env:CEMPALA_VERSION) { $env:CEMPALA_VERSION = "latest" }
