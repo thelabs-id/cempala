@@ -102,7 +102,7 @@ On **Windows on ARM** the installer fetches the x64 build, which runs under emul
 Both installers:
 - detect OS + arch and download the matching pre-compiled binary
 - verify a SHA-256 checksum before doing anything with the file
-- drop the binary into `~/.cempala/bin` (macOS/Linux) or `%LOCALAPPDATA%\Cempala\bin` (Windows)
+- drop the binary into `~/.cempala/bin` — the same place on every platform (`%USERPROFILE%\.cempala\bin` on Windows), deliberately **not** under `AppData`, which some agent clients cannot see from the processes they spawn
 - add it to `PATH` for the current shell **and** for future shells
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
