@@ -108,41 +108,55 @@ try {
 
   # Run a CLI and return its exit code + merged output.
   #
-  # Use cmd /c to resolve the .cmd/.ps1 shim that npm installs
-  # (`Start-Process -FilePath codex` fails with "is not a valid Win32
-  # application" on a .ps1 shim; `cmd /c codex ...` walks PATHEXT the way
-  # users expect).
+  # Takes the RESOLVED executable and a real argument array, rather than a
+  # command string handed to cmd.exe. That matters now that we register an
+  # absolute path: `%LOCALAPPDATA%` sits under the user's profile, so any
+  # account with a space in its name produces a path that a hand-built
+  # cmd.exe string would split in two. Passing an array lets PowerShell do
+  # the quoting, which it gets right.
   #
-  # The `2>&1` goes INSIDE the cmd.exe string on purpose. Redirecting a
-  # native command's stderr on the PowerShell side wraps each line in a
-  # NativeCommandError, which under the script-wide
-  # $ErrorActionPreference = "Stop" is terminating -- so a CLI that merely
-  # prints a warning to stderr would abort the whole installer instead of
-  # reaching the error branch below. Letting cmd.exe merge the streams
-  # means PowerShell only ever sees stdout.
+  # Resolving the name first (Get-Command) also keeps the npm shims working:
+  # `codex` is a .cmd, and calling its resolved path with & runs it correctly
+  # without needing cmd.exe to walk PATHEXT for us.
+  #
+  # $ErrorActionPreference is dropped to Continue around the call. Redirecting
+  # a native command's stderr wraps each line in a NativeCommandError, which
+  # under the script-wide "Stop" is terminating -- so a CLI that merely prints
+  # a warning to stderr would abort the whole installer instead of reaching
+  # the error branch below. We need stderr, because that is where the CLIs
+  # write "already exists".
+  # Render an argument array as a copy-pasteable command line. The binary path
+  # is absolute and may contain spaces, so any argument containing one has to
+  # come back quoted or the printed fallback command would not work.
+  function Format-CliHint {
+    param([string[]]$CliArgs)
+    ($CliArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+  }
+
   function Invoke-Cli {
-    param([string]$CommandLine)
+    param([string]$Exe, [string[]]$CliArgs)
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-      $out = cmd /c "$CommandLine 2>&1"
-      return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n").Trim() }
+      $out = & $Exe @CliArgs 2>&1
+      return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out | Out-String).Trim()) }
     } finally {
       $ErrorActionPreference = $prevEAP
     }
   }
 
   function Register-Agent {
-    param([string]$Name, [string]$AddArgs, [string]$RemoveArgs)
-    $exe = Get-Command $Name -ErrorAction SilentlyContinue
-    if (-not $exe) {
+    param([string]$Name, [string[]]$AddArgs, [string[]]$RemoveArgs)
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if (-not $cmd) {
       Write-Host "  ! $Name not found on PATH. To register cempala manually once $Name is installed, run:"
-      Write-Host "      $Name $AddArgs"
+      Write-Host "      $Name $(Format-CliHint $AddArgs)"
       return
     }
+    $exe = $cmd.Source
 
     Write-Host "-> $Name found, registering cempala as an MCP server"
-    $r = Invoke-Cli "$Name $AddArgs"
+    $r = Invoke-Cli -Exe $exe -CliArgs $AddArgs
 
     # FR-22: re-running the installer must be safe. Not every CLI's
     # `mcp add` is idempotent -- `codex mcp add` updates in place and
@@ -158,32 +172,48 @@ try {
     # broken one. Leaving an existing registration untouched is always the
     # safe direction when we cannot identify the failure.
     if ($r.ExitCode -ne 0 -and $RemoveArgs -and $r.Output -match "already exists") {
-      Invoke-Cli "$Name $RemoveArgs" | Out-Null
-      $r = Invoke-Cli "$Name $AddArgs"
+      Invoke-Cli -Exe $exe -CliArgs $RemoveArgs | Out-Null
+      $r = Invoke-Cli -Exe $exe -CliArgs $AddArgs
     }
 
     if ($r.ExitCode -eq 0) {
       Write-Host "  [ok] $Name mcp add succeeded"
     } else {
       Write-Host "  ! $Name mcp add failed (exit=$($r.ExitCode)) -- you may need to re-run it manually:"
-      Write-Host "      $Name $AddArgs"
+      Write-Host "      $Name $(Format-CliHint $AddArgs)"
       if ($r.Output) { Write-Host "      $($r.Output)" }
     }
   }
 
-  Register-Agent -Name "claude" -AddArgs "mcp add cempala --scope user -- cempala" `
-                                -RemoveArgs "mcp remove cempala --scope user"
-  Register-Agent -Name "codex"  -AddArgs "mcp add cempala -- cempala" `
-                                -RemoveArgs "mcp remove cempala"
+  # Register the ABSOLUTE path, not the bare name `cempala`.
+  #
+  # A bare name makes the agent CLI resolve it through PATH at launch, and on
+  # Windows a process gets a COPY of the environment when it starts. Install
+  # cempala while Claude Code is already running and that process's PATH
+  # predates the bin directory, so it cannot find the executable and shows the
+  # server as "failed" -- with a working binary sitting on disk and a correct
+  # registration. Nothing is wrong except where the client is looking.
+  #
+  # We know exactly where the binary was just placed, so there is no reason to
+  # make the client rediscover it. An absolute path works regardless of PATH,
+  # in any already-running client, forever.
+  Register-Agent -Name "claude" -AddArgs @("mcp", "add", "cempala", "--scope", "user", "--", $dest) `
+                                -RemoveArgs @("mcp", "remove", "cempala", "--scope", "user")
+  Register-Agent -Name "codex"  -AddArgs @("mcp", "add", "cempala", "--", $dest) `
+                                -RemoveArgs @("mcp", "remove", "cempala")
 
   Write-Host ""
   Write-Host "[ok] cempala installed."
   Write-Host ""
   Write-Host "Next steps:"
-  Write-Host "  - Open a new PowerShell window so cempala is on PATH."
-  Write-Host "  - In Claude Code or Codex, run '<cli> mcp list' to confirm cempala is registered."
+  Write-Host "  - RESTART any Claude Code or Codex session that is already open, so it"
+  Write-Host "    picks up the registration. Until you do, it will show cempala as failed."
+  Write-Host "  - Then run '<cli> mcp list' to confirm cempala is connected."
   Write-Host "  - From any project under your home directory, dispatch or message the other agent."
   Write-Host "  - For paths outside your home, call approve_path after the human confirms."
+  Write-Host ""
+  Write-Host "  (cempala is on your PATH for new shells too, but the MCP registration"
+  Write-Host "   points at the binary directly, so it does not depend on that.)"
   Write-Host ""
   Write-Host "To re-run this installer (e.g. to upgrade), it's safe -- the binary is"
   Write-Host "overwritten in place and the MCP registrations are idempotent."

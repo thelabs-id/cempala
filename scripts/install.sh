@@ -125,19 +125,29 @@ echo "→ running cempala --init"
 "${bin_dir}/cempala" --init
 
 # --- 6. Auto-register with claude / codex where present ---
+# register <cli> <binary-path> [extra add/remove flags...]
+#
+# Flags are passed as real arguments rather than a single word-split string,
+# because the binary path is now absolute and a user whose home contains a
+# space would otherwise have it split into two arguments.
 register() {
-  local name="$1"
-  local add_args="$2"
-  local remove_args="${3:-}"
+  local name="$1"; shift
+  local bin="$1"; shift
+  local flags=( "$@" )
+  local add_args=( mcp add cempala "${flags[@]}" -- "$bin" )
+  local remove_args=( mcp remove cempala "${flags[@]}" )
+
   if ! command -v "$name" >/dev/null 2>&1; then
     echo "  ! $name not found on PATH. To register cempala manually once $name is installed, run:"
-    echo "      $name $add_args"
+    # Quote the path — it is absolute and may contain spaces, and this line
+    # exists to be copy-pasted.
+    echo "      $name mcp add cempala ${flags[*]} -- \"$bin\""
     return 0
   fi
 
   echo "→ $name found, registering cempala as an MCP server"
   local rc=0 out=""
-  out=$("$name" $add_args 2>&1) || rc=$?
+  out=$("$name" "${add_args[@]}" 2>&1) || rc=$?
   [ -n "$out" ] && echo "$out"
   if [ "$rc" -eq 0 ]; then
     echo "  ✓ $name mcp add succeeded"
@@ -157,10 +167,10 @@ register() {
   # and then possibly fail to re-add it — turning a working install into a
   # broken one. Leaving an existing registration untouched is always the safe
   # direction when we cannot identify the failure.
-  if [ -n "$remove_args" ] && printf '%s' "$out" | grep -qi "already exists"; then
-    "$name" $remove_args >/dev/null 2>&1 || true
+  if printf '%s' "$out" | grep -qi "already exists"; then
+    "$name" "${remove_args[@]}" >/dev/null 2>&1 || true
     rc=0
-    "$name" $add_args || rc=$?
+    "$name" "${add_args[@]}" || rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "  ✓ $name mcp add succeeded (re-registered)"
       return 0
@@ -168,22 +178,35 @@ register() {
   fi
 
   echo "  ! $name mcp add failed (rc=$rc) — you may need to re-run it manually:"
-  echo "      $name $add_args"
+  echo "      $name mcp add cempala ${flags[*]} -- \"$bin\""
   return 0
 }
 
-register claude "mcp add cempala --scope user -- cempala" "mcp remove cempala --scope user"
-register codex  "mcp add cempala -- cempala"              "mcp remove cempala"
+# Register the ABSOLUTE path, not the bare name `cempala`.
+#
+# A bare name makes the agent CLI resolve it through PATH at launch, and a
+# process gets a COPY of the environment when it starts. Install cempala while
+# an agent CLI is already running and that process's PATH predates the bin
+# directory, so it cannot find the executable and reports the server as failed
+# — with a working binary on disk and a correct registration. Nothing is wrong
+# except where the client is looking. We know where the binary was just put, so
+# there is no reason to make the client rediscover it.
+register claude "${bin_dir}/cempala" --scope user
+register codex  "${bin_dir}/cempala"
 
 cat <<'EOF'
 
 ✓ cempala installed.
 
 Next steps:
-  - Start a new shell (or `source` your rc file) so `cempala` is on PATH.
-  - In Claude Code or Codex, run `<cli> mcp list` to confirm cempala is registered.
+  - RESTART any Claude Code or Codex session that is already open, so it picks
+    up the registration. Until you do, it will show cempala as failed.
+  - Then run `<cli> mcp list` to confirm cempala is connected.
   - From any project under your home directory, dispatch or message the other agent.
   - For paths outside your home, call `approve_path` after the human confirms.
+
+  (cempala is on your PATH for new shells too, but the MCP registration points
+   at the binary directly, so it does not depend on that.)
 
 To re-run this installer (e.g. to upgrade), it's safe — the binary is
 overwritten in place and the MCP registrations are idempotent.
