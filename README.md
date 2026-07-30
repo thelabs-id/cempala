@@ -53,6 +53,24 @@ Every `dispatch` also writes a task row, so the synchronous and mailbox paths sh
 - **Local-first.** No account, no server to sign into, no open port. Delete `~/.cempala/` and it's gone.
 - **Honest network control.** Handoffs run offline by default, and each result reports exactly what was enforced.
 
+## Requirements
+
+- **Bun** is not needed — the installer ships a self-contained binary.
+- **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`) and/or [Codex](https://developers.openai.com/codex/cli) (`codex`). Install both to hand work in either direction.
+- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to `claude` and `codex` and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
+
+Check before you start:
+
+```sh
+claude -p "reply with OK"
+```
+
+```sh
+codex exec "reply with OK"
+```
+
+If either prints an authentication error instead of `OK`, sign that CLI in — `claude auth` or `codex login` (`codex login status` shows where you stand) — and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem.
+
 ## Install
 
 macOS / Linux:
@@ -75,7 +93,7 @@ Both installers:
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
 
-The script is idempotent. Re-running it (e.g. to upgrade) overwrites the binary in place and leaves existing config and MCP registrations untouched.
+The script is idempotent. Re-running it (e.g. to upgrade) overwrites the binary in place, leaves an existing `config.toml` untouched, and re-points the MCP registrations at the new binary without duplicating them.
 
 ## The 8 MCP tools
 
@@ -90,7 +108,7 @@ The script is idempotent. Re-running it (e.g. to upgrade) overwrites the binary 
 | `check_task` | Read current task state; reconciles a `running` task whose process has died. | FR-7 |
 | `approve_path` | Persist a path outside the home into `approved_paths`. Denylisted paths cannot be approved. | FR-7a |
 
-Every call is logged to `audit_log` with timing, args, and a short result summary. A reaper (FR-17) sweeps stale `running` tasks whose PID is dead and > 30 minutes old on every tool call.
+Every call is logged to `audit_log` with timing, args, and a short result summary. A reaper (FR-17) runs on every tool call and clears `running` tasks that are over 30 minutes old and no longer live, recording what actually happened — `completed` when the captured output shows the agent finished its turn, `failed` otherwise. A dead process ID on its own is deliberately not treated as a failed task: on Windows the agent CLIs run behind a launcher shim, so the recorded PID can die while the agent works on and finishes.
 
 ## Trust & safety model
 

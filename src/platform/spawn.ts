@@ -8,7 +8,7 @@
 // after a server restart — see AGENTS.md §6 "Liveness must be restart-safe").
 
 import { spawn, type Subprocess } from "bun";
-import { realpathSync, existsSync } from "node:fs";
+import { realpathSync, existsSync, openSync, closeSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -29,6 +29,17 @@ export interface SpawnOptions {
 export interface SpawnHandle {
   /** OS-level PID. Persist this — liveness is re-derivable from it alone. */
   pid: number;
+  /**
+   * Whether `pid` is the agent itself rather than a launcher standing in
+   * front of it.
+   *
+   * True in every case except a Windows .cmd shim, where the pid belongs to
+   * the shim. That distinction decides whether the process's exit status can
+   * be taken as the task's outcome: a shim exiting non-zero (because it was
+   * killed) says nothing about the agent it launched, which may still be
+   * working. See shouldDetach().
+   */
+  pidIsAgent: boolean;
   /** File where stdout is being captured (the JSON result, etc). */
   outputFile: string;
   /** File where stderr is being captured (diagnostics). */
@@ -45,11 +56,14 @@ export interface SpawnHandle {
 /**
  * Detach a child process from the current one.
  *
- * - POSIX: own process group, stdio redirected to a file, no TTY.
- * - Windows: no POSIX process groups, so we use the closest available
- *   mechanism (no `detached: true` does not exist in the Bun.spawn API;
- *   the child gets its own process tree by virtue of stdio redirection
- *   and not being waited on synchronously).
+ * - POSIX: own session/process group via setsid(), stdio redirected to a
+ *   file, no TTY.
+ * - Windows: no POSIX process groups; whether UV_PROCESS_DETACHED is used
+ *   depends on whether we're launching a real .exe or a .cmd shim, because
+ *   it breaks output capture for the latter — see shouldDetach() below. In
+ *   the shim case the recorded pid can die while the agent lives on, which
+ *   is exactly why liveness is not allowed to equate a dead pid with a
+ *   failed task (tools/task-liveness.ts).
  *
  * Critically: we do NOT call `await proc.exited` here. The handle exposes
  * the promise but doesn't block. `dispatch`'s bounded wait is what decides
@@ -60,24 +74,28 @@ export function spawnDetached(opts: SpawnOptions): SpawnHandle {
   const outFile = opts.outputFile;
   const errFile = opts.stderrFile ?? `${outFile}.err`;
 
-  // Bun.spawn accepts a file path directly for stdout/stderr. Ensure the
-  // parent dir exists so file creation cannot fail.
+  // Ensure the output dir exists before opening the capture files. Callers
+  // are expected to have created it already; this is belt-and-braces, and it
+  // has to actually run now that we open the files ourselves — `openSync`
+  // throws on a missing directory, where the old path silently deferred the
+  // failure to Bun.
   const parent = dirname(outFile);
-  if (!existsSync(parent)) {
-    // Best-effort; if this throws the spawn will surface the underlying error.
-    // The caller is expected to have created the output dir already.
-  }
+  if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
 
-  // Two SEPARATE file handles for stdout and stderr (P2 fix). Sharing
-  // a single Bun.file for both can corrupt the capture: Bun opens
-  // distinct write handles per-stdio slot, and a process that writes
-  // partial JSON to stdout + a warning to stderr can have stderr
-  // overwrite stdout (or the writes interleave on disk), losing the
-  // JSON result the dispatch wrapper needs to parse. Stderr is kept
-  // in a sibling file for diagnostics; the dispatch result only
-  // reads stdout.
-  const outHandle = Bun.file(outFile);
-  const errHandle = Bun.file(errFile);
+  // Two SEPARATE handles for stdout and stderr (P2 fix). Sharing one for
+  // both can corrupt the capture: a process that writes partial JSON to
+  // stdout + a warning to stderr can have stderr overwrite stdout (or the
+  // writes interleave on disk), losing the JSON result the dispatch wrapper
+  // needs to parse. Stderr is kept in a sibling file for diagnostics; the
+  // dispatch result only reads stdout.
+  //
+  // Raw OS file descriptors rather than `Bun.file(path)`: the child inherits
+  // these as real handles it writes to directly, so capture does not depend
+  // on this process being around to pump anything. Verified on Windows 11 /
+  // Bun 1.3.14 that output keeps landing in the file after the spawning
+  // process exits cleanly AND after a hard `taskkill /F`.
+  const outFd = openSync(outFile, "w");
+  const errFd = openSync(errFile, "w");
 
   // Cross-platform note: we deliberately let Bun.spawn inherit the parent
   // process's env by default. Spreading `process.env` into an `env` object
@@ -91,24 +109,92 @@ export function spawnDetached(opts: SpawnOptions): SpawnHandle {
     ? opts.env
     : undefined;
 
-  const proc: Subprocess = spawn({
-    cmd: opts.argv,
-    cwd: opts.cwd,
-    env,
-    stdio: ["ignore", outHandle, errHandle],
-    // On POSIX, { detached: true } creates a new process group so the
-    // child survives parent exit. On Windows the flag has no equivalent
-    // semantics and is ignored; we still set it so the intent is recorded
-    // at the call site.
-    detached: process.platform !== "win32",
-  });
+  // See shouldDetach() — on Windows this depends on what we're actually
+  // launching, and the difference is measured, not assumed. It doubles as
+  // "is the pid we're about to record the agent's own?", since the only case
+  // we don't detach is the one where a shim sits in front of the agent.
+  const detached = shouldDetach(opts.argv[0]);
+
+  let proc: Subprocess;
+  try {
+    proc = spawn({
+      cmd: opts.argv,
+      cwd: opts.cwd,
+      env,
+      stdio: ["ignore", outFd, errFd],
+      detached,
+    });
+  } finally {
+    // The child holds its own inherited copies of these descriptors, so our
+    // originals are dead weight the moment spawn() returns — and leaking one
+    // per dispatch would eventually exhaust the fd table of a long-lived
+    // server. Closing in `finally` covers the spawn-throws path too.
+    closeQuietly(outFd);
+    closeQuietly(errFd);
+  }
 
   return {
     pid: proc.pid,
+    pidIsAgent: detached,
     outputFile: outFile,
     stderrFile: errFile,
     exited: proc.exited,
   };
+}
+
+/**
+ * Whether to pass `detached` for a given executable.
+ *
+ * POSIX: always. setsid() gives the child its own session, it genuinely
+ * outlives us, and nothing about output capture changes.
+ *
+ * Windows: only when we are launching a real executable, NOT a command-script
+ * shim (`.cmd` / `.bat`). Both halves of that are measured on Windows 11 /
+ * Bun 1.3.14, and the asymmetry is the whole reason this function exists:
+ *
+ *   - Direct .exe (how `claude` installs here) — `detached` works properly:
+ *     the child survives this process exiting AND its output is captured in
+ *     full. So we detach, and as a bonus the pid we record IS the agent's,
+ *     which makes liveness exact.
+ *
+ *   - .cmd shim (how npm installs `codex`) — `detached` silently destroys
+ *     output capture: a run that does its work perfectly writes a 0-byte
+ *     log, losing the agent's answer entirely and leaving check_task nothing
+ *     to reconcile from. So we do NOT detach there, which means Bun kills
+ *     the shim when this process exits, and the pid we recorded dies with it.
+ *
+ * Whether the agent BEHIND a shim survives that kill is a property of the
+ * shim, not something this code can promise. Measured both ways: the real
+ * codex CLI (npm's shim idiom) is orphaned and runs to completion, still
+ * writing to the inherited fd above; a plain .cmd whose child is an ordinary
+ * executable is killed along with it.
+ *
+ * So on Windows a dead recorded pid means "the shim is gone" and nothing
+ * more — the task may have finished, may still be running, or may have been
+ * killed. Liveness must therefore never read "recorded pid is dead" as "the
+ * task failed"; tools/task-liveness.ts is what decides between those cases,
+ * and is where the false-failure bug this comment exists to prevent was
+ * actually fixed.
+ *
+ * `Bun.which` resolves through PATH/PATHEXT the way the OS would, so this
+ * classifies the file that will really be launched rather than guessing from
+ * the bare name in argv. An unresolvable name falls through to detaching:
+ * the spawn is about to fail anyway, and the alternative would silently opt
+ * real executables out of detachment whenever `which` came up empty.
+ */
+export function shouldDetach(argv0: string | undefined): boolean {
+  if (process.platform !== "win32") return true;
+  if (!argv0) return true;
+  const resolved = Bun.which(argv0) ?? argv0;
+  return !/\.(cmd|bat)$/i.test(resolved);
+}
+
+function closeQuietly(fd: number): void {
+  try {
+    closeSync(fd);
+  } catch {
+    // Already closed, or never validly opened — nothing useful to do here.
+  }
 }
 
 /**

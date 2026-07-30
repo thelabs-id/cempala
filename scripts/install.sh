@@ -127,22 +127,53 @@ echo "→ running cempala --init"
 # --- 6. Auto-register with claude / codex where present ---
 register() {
   local name="$1"
-  local cmd="$2"
-  if command -v "$name" >/dev/null 2>&1; then
-    echo "→ $name found, registering cempala as an MCP server"
-    if "$name" $cmd; then
-      echo "  ✓ $name mcp add succeeded"
-    else
-      echo "  ! $name mcp add failed (rc=$?) — you may need to re-run it manually"
-    fi
-  else
+  local add_args="$2"
+  local remove_args="${3:-}"
+  if ! command -v "$name" >/dev/null 2>&1; then
     echo "  ! $name not found on PATH. To register cempala manually once $name is installed, run:"
-    echo "      $name $cmd"
+    echo "      $name $add_args"
+    return 0
   fi
+
+  echo "→ $name found, registering cempala as an MCP server"
+  local rc=0 out=""
+  out=$("$name" $add_args 2>&1) || rc=$?
+  [ -n "$out" ] && echo "$out"
+  if [ "$rc" -eq 0 ]; then
+    echo "  ✓ $name mcp add succeeded"
+    return 0
+  fi
+
+  # FR-22: re-running the installer must be safe. Not every CLI's `mcp add`
+  # is idempotent — `codex mcp add` updates in place and exits 0, but
+  # `claude mcp add` exits 1 with "already exists" and offers no
+  # --force/--update flag. So for THAT failure specifically, drop the
+  # existing registration and add it again. That also picks up a changed
+  # command line on upgrade, which "already exists, skipping" would not.
+  #
+  # The match on the CLI's message is deliberately narrow. Reacting to any
+  # non-zero exit would mean a transient failure (a locked config, a
+  # permissions problem) causes us to DELETE a perfectly good registration
+  # and then possibly fail to re-add it — turning a working install into a
+  # broken one. Leaving an existing registration untouched is always the safe
+  # direction when we cannot identify the failure.
+  if [ -n "$remove_args" ] && printf '%s' "$out" | grep -qi "already exists"; then
+    "$name" $remove_args >/dev/null 2>&1 || true
+    rc=0
+    "$name" $add_args || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      echo "  ✓ $name mcp add succeeded (re-registered)"
+      return 0
+    fi
+  fi
+
+  echo "  ! $name mcp add failed (rc=$rc) — you may need to re-run it manually:"
+  echo "      $name $add_args"
+  return 0
 }
 
-register claude "mcp add cempala --scope user -- cempala"
-register codex  "mcp add cempala -- cempala"
+register claude "mcp add cempala --scope user -- cempala" "mcp remove cempala --scope user"
+register codex  "mcp add cempala -- cempala"              "mcp remove cempala"
 
 cat <<'EOF'
 

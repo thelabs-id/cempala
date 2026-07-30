@@ -6,7 +6,7 @@
 // Integration tests gated by CEMPALA_INTEGRATION=1 cover the real CLIs.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, readFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -34,6 +34,11 @@ beforeEach(() => {
   // fail: exit 7 with a message on stderr
   writeFileSync(join(scriptsDir, "fail.js"),
     `process.stderr.write("boom"); process.exit(7);`);
+  // agent-reported failure with a SUCCESSFUL process exit: the shape
+  // `claude -p --output-format json` uses for API-level errors such as an
+  // expired OAuth token.
+  writeFileSync(join(scriptsDir, "soft-fail.js"),
+    `console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "API Error: 401 OAuth access token has expired." })); process.exit(0);`);
 
   // A real cwd under home (must exist for Bun.spawn to succeed).
   homeCwd = join(homedir(), ".cempala-test-runs", String(Date.now()));
@@ -60,7 +65,355 @@ afterEach(() => {
   try { rmSync(join(homedir(), ".cempala-test-runs"), { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
+describe("dispatch (FR-6) — Windows .cmd shim exit handling", () => {
+  // On Windows a .cmd shim is spawned non-detached (see platform/spawn.ts),
+  // so the recorded pid is the SHIM's. A shim exiting non-zero — because it
+  // was killed, which is what happens when this server goes down — says
+  // nothing about the agent it launched. Recording that as the task's
+  // outcome is the false-failure bug arriving by a second route.
+  const IS_WINDOWS = process.platform === "win32";
+
+  function writeShim(name: string, body: string[]): string {
+    const p = join(scriptsDir, name);
+    writeFileSync(p, ["@echo off", ...body, ""].join("\r\n"));
+    return p;
+  }
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim that dies AFTER its agent started producing output leaves the task running",
+    async () => {
+      // Emits agent output (no verdict yet), then exits non-zero — the shape
+      // of a shim killed mid-run while its agent works on.
+      const shim = writeShim("shim-midrun.cmd", [
+        'echo {"type":"thread.started","thread_id":"x"}',
+        'echo {"type":"turn.started"}',
+        "exit /b 1",
+      ]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (r.ok) expect(r.data.status).toBe("running");
+        const row = env.db.get<{ status: string }>(
+          `SELECT status FROM tasks WHERE via='dispatch' ORDER BY created_at DESC LIMIT 1`,
+        );
+        expect(row?.status).toBe("running");
+      } finally { env.cleanup(); }
+    },
+    30_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim that dies having produced NOTHING is a real failure, not a stuck task",
+    async () => {
+      // No agent ever got far enough to speak, so the shim's failure is the
+      // whole story. Deferring here would swap a false failure for a task
+      // pinned at `running` until the reaper — no bargain.
+      const shim = writeShim("shim-nostart.cmd", ["exit /b 9"]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (r.ok && r.data.status !== "running" && r.data.status !== "needs_approval") {
+          expect(r.data.status).toBe("failed");
+          expect(r.data.exit_code).toBe(9);
+        }
+      } finally { env.cleanup(); }
+    },
+    30_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim that dies printing plain diagnostics settles as a failure, keeping its exit code",
+    async () => {
+      // Plain diagnostics are ambiguous at a glance — equally the shape of a
+      // launcher dying on a bad argument and of an agent reporting progress
+      // before its first stdout. So the task is briefly `running` while that
+      // resolves, and must then settle as the failure it is WITHOUT losing
+      // the launcher's exit code to a bare -1. It must not sit at `running`
+      // until the reaper.
+      const shim = writeShim("shim-usage.cmd", ["echo usage: bad args", "exit /b 9"]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) throw new Error("expected ok");
+
+        // Nobody calls check_task and no reaper runs — the watcher settles it.
+        const deadline = Date.now() + 60_000;
+        let row: { status: string; exit_code: number | null } | undefined;
+        while (Date.now() < deadline) {
+          row = env.db.get<{ status: string; exit_code: number | null }>(
+            `SELECT status, exit_code FROM tasks WHERE id = ?`,
+            [r.data.task_id],
+          );
+          if (row && row.status !== "running") break;
+          await Bun.sleep(1000);
+        }
+        expect(row?.status).toBe("failed");
+        expect(row?.exit_code).toBe(9);
+      } finally { env.cleanup(); }
+    },
+    90_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim that dies while its agent has written only to stderr does NOT fail the task",
+    async () => {
+      // The asymmetry bug: judging the shim's exit from stdout alone made the
+      // live dispatch process fail a task that check_task — which reads
+      // stderr too — would have kept running. Two paths must never disagree
+      // about identical output.
+      const shim = writeShim("shim-stderr.cmd", ["echo working... 1>&2", "exit /b 1"]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) throw new Error("expected ok");
+        expect(r.data.status).toBe("running");
+        const row = env.db.get<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [
+          r.data.task_id,
+        ]);
+        expect(row?.status).toBe("running");
+      } finally { env.cleanup(); }
+    },
+    30_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a deferred task settles itself once the orphaned agent finishes, without anyone polling",
+    async () => {
+      // Deferring the shim's exit is only half the job. `exited` is a
+      // one-shot and has already fired, so if nothing keeps watching, a run
+      // that finishes seconds later sits at `running` until a caller happens
+      // to call check_task or the reaper sweeps 30 minutes on. Here nobody
+      // calls check_task at all — the row must settle on its own.
+      const shim = writeShim("shim-defer.cmd", [
+        'echo {"type":"thread.started","thread_id":"x"}',
+        'echo {"type":"turn.started"}',
+        "exit /b 1",
+      ]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok && r.data.status).toBe("running");
+        if (!r.ok) throw new Error("expected ok");
+
+        const row = env.db.get<{ output_file: string }>(
+          `SELECT output_file FROM tasks WHERE id = ?`,
+          [r.data.task_id],
+        );
+        expect(row?.output_file).toBeTruthy();
+
+        // Stand in for the orphaned agent finishing its turn and writing its
+        // answer to the inherited output handle.
+        appendFileSync(
+          row!.output_file,
+          [
+            `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"DONE"}}`,
+            `{"type":"turn.completed","usage":{"input_tokens":1}}`,
+            "",
+          ].join("\n"),
+        );
+
+        // No check_task, no reaper — just wait for the watcher.
+        const deadline = Date.now() + 20_000;
+        let status = "running";
+        while (Date.now() < deadline) {
+          await Bun.sleep(1000);
+          status =
+            env.db.get<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [r.data.task_id])
+              ?.status ?? "running";
+          if (status !== "running") break;
+        }
+        expect(status).toBe("completed");
+        const done = env.db.get<{ result: string; exit_code: number | null }>(
+          `SELECT result, exit_code FROM tasks WHERE id = ?`,
+          [r.data.task_id],
+        );
+        expect(done?.result).toBe("DONE");
+        expect(done?.exit_code).toBe(0);
+      } finally { env.cleanup(); }
+    },
+    45_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim's non-zero exit does not override a successful agent verdict",
+    async () => {
+      const shim = writeShim("shim-verdict.cmd", [
+        'echo {"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"DONE"}}',
+        'echo {"type":"turn.completed","usage":{"input_tokens":1}}',
+        "exit /b 1",
+      ]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) throw new Error("expected ok");
+        // The shim exited 1, but that status belongs to the LAUNCHER. The
+        // agent finished its turn and said DONE, so the task succeeded.
+        // Letting the shim's exit win here would report `failed` for a
+        // completed run — the false failure, one layer down.
+        expect(r.data.status).toBe("completed");
+        if (r.data.status === "completed") {
+          expect(r.data.exit_code).toBe(0);
+          expect(r.data.result).toBe("DONE");
+        }
+        const row = env.db.get<{ status: string; exit_code: number | null; result: string }>(
+          `SELECT status, exit_code, result FROM tasks WHERE id = ?`,
+          [r.data.task_id],
+        );
+        expect(row?.status).toBe("completed");
+        expect(row?.exit_code).toBe(0);
+        expect(row?.result).toBe("DONE");
+      } finally { env.cleanup(); }
+    },
+    30_000,
+  );
+
+  test.skipIf(!IS_WINDOWS)(
+    "a shim's non-zero exit still fails the task when the agent itself reported failure",
+    async () => {
+      // The mirror of the case above: discarding the launcher's status must
+      // not turn an agent-reported failure into a success.
+      const shim = writeShim("shim-agentfail.cmd", [
+        'echo {"type":"turn.failed","error":"sandbox denied write"}',
+        "exit /b 1",
+      ]);
+      const env = makeEnv();
+      try {
+        const cfg: AppConfig = {
+          ...cfgOverride,
+          server: env.cfg.server,
+          agents: { ...cfgOverride.agents, codex: { exec_command: [shim] } },
+        };
+        const r = await dispatch(env.db, cfg, {
+          target_agent: "codex",
+          prompt: "work",
+          cwd: homeCwd,
+          created_by: "claude",
+          wait_seconds: 20,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) throw new Error("expected ok");
+        expect(r.data.status).toBe("failed");
+        if (r.data.status === "failed") {
+          expect(r.data.exit_code).not.toBe(0);
+          expect(r.data.result).toContain("sandbox denied write");
+        }
+      } finally { env.cleanup(); }
+    },
+    30_000,
+  );
+});
+
 describe("dispatch (FR-6) — fake CLI", () => {
+  test("an agent that reports is_error but exits 0 is recorded as failed", async () => {
+    // A zero exit status is not proof of success. `claude -p --output-format
+    // json` reports API-level failures (an expired token, say) as
+    // `is_error: true` in its envelope. Trusting the exit code alone would
+    // record that as `completed` with the error text sitting in `result` —
+    // and would disagree with the restart path (check_task / the reaper),
+    // which reads the same output and calls it failed. The status a caller
+    // sees must not depend on whether the server happened to stay up.
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        server: env.cfg.server,
+        agents: {
+          ...cfgOverride.agents,
+          codex: { exec_command: [process.execPath, join(scriptsDir, "soft-fail.js")] },
+        },
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "codex",
+        prompt: "do something",
+        cwd: homeCwd,
+        created_by: "claude",
+        wait_seconds: 30,
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok && r.data.status !== "running" && r.data.status !== "needs_approval") {
+        expect(r.data.status).toBe("failed");
+        expect(r.data.exit_code).not.toBe(0);
+        expect(r.data.result).toContain("401");
+      }
+      const row = env.db.get<{ status: string; exit_code: number | null }>(
+        `SELECT status, exit_code FROM tasks WHERE via='dispatch' ORDER BY created_at DESC LIMIT 1`,
+      );
+      expect(row?.status).toBe("failed");
+      expect(row?.exit_code).not.toBe(0);
+    } finally { env.cleanup(); }
+  });
+
   test("a fast fake-cli target completes and returns the result", async () => {
     const env = makeEnv();
     try {

@@ -6,6 +6,8 @@
 // number (large value, or 0, or our own short-lived child).
 
 import { describe, test, expect } from "bun:test";
+import { writeFileSync, utimesSync } from "node:fs";
+import { join } from "node:path";
 import { makeEnv } from "./_helpers.ts";
 import { sweepStaleTasks } from "../../src/reaper.ts";
 import { spawn } from "bun";
@@ -55,9 +57,58 @@ describe("sweepStaleTasks (FR-17 / AC-6 sweep path)", () => {
       );
       const r = sweepStaleTasks(env.db, Date.now());
       expect(r.swept).toBe(1);
-      const row = env.db.get<{ status: string; result: string }>(`SELECT status, result FROM tasks WHERE id='t-stale'`);
+      const row = env.db.get<{ status: string; result: string; exit_code: number | null }>(
+        `SELECT status, result, exit_code FROM tasks WHERE id='t-stale'`,
+      );
       expect(row?.status).toBe("failed");
       expect(row?.result).toContain("process exited without a recorded result");
+      // A swept row must carry an exit code like every other terminal row —
+      // leaving it NULL made swept tasks a second-class shape for the audit
+      // trail.
+      expect(row?.exit_code).toBe(-1);
+    } finally { env.cleanup(); }
+  });
+
+  test("a stale task whose output shows success is swept as completed, not failed", async () => {
+    // The sweep exists to stop rows sitting at `running` forever — not to
+    // overwrite a success with a failure. Blanket-failing every swept row
+    // reported agents as having failed work they had actually finished.
+    const env = makeEnv();
+    try {
+      const proc = spawn({
+        cmd: [process.execPath, "-e", "process.exit(0)"],
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      const childPid = proc.pid;
+      await proc.exited;
+
+      const outFile = join(env.dir, "swept-output.log");
+      writeFileSync(
+        outFile,
+        [
+          `{"type":"turn.started"}`,
+          `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"all done"}}`,
+          `{"type":"turn.completed","usage":{"input_tokens":10}}`,
+        ].join("\n"),
+      );
+      const old = new Date(Date.now() - 31 * 60 * 1000);
+      utimesSync(outFile, old, old);
+
+      const past = Date.now() - 31 * 60 * 1000;
+      env.db.run(
+        `INSERT INTO tasks(id, description, created_by, cwd, status, via, created_at, started_at, pid, output_file)
+         VALUES ('t-done', 'finished', 'claude', '.', 'running', 'dispatch', ?, ?, ?, ?)`,
+        [past, past, childPid, outFile],
+      );
+
+      const r = sweepStaleTasks(env.db, Date.now());
+      expect(r.swept).toBe(1);
+      const row = env.db.get<{ status: string; result: string; exit_code: number | null }>(
+        `SELECT status, result, exit_code FROM tasks WHERE id='t-done'`,
+      );
+      expect(row?.status).toBe("completed");
+      expect(row?.result).toBe("all done");
+      expect(row?.exit_code).toBe(0);
     } finally { env.cleanup(); }
   });
 });

@@ -12,7 +12,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { SCHEMA_SQL } from "./schema.ts";
+import { SCHEMA_SQL, COLUMN_MIGRATIONS } from "./schema.ts";
 
 export type SqlParam = SQLQueryBindings | null | undefined;
 export type SqlParams = SqlParam[];
@@ -53,6 +53,14 @@ export function openDatabase(dbPath: string): DB {
   // bound — typical writes are sub-millisecond.
   raw.exec("PRAGMA busy_timeout = 5000;");
   raw.exec(SCHEMA_SQL);
+
+  // Additive column migrations for DBs created by earlier builds. `CREATE
+  // TABLE IF NOT EXISTS` above leaves an existing table untouched, so without
+  // this an upgraded cempala would fail on every query naming a new column.
+  for (const m of COLUMN_MIGRATIONS) {
+    const cols = raw.prepare(`PRAGMA table_info(${m.table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === m.column)) raw.exec(m.ddl);
+  }
 
   const db: DB = {
     raw,
