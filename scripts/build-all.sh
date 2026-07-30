@@ -28,9 +28,51 @@ for entry in "${targets[@]}"; do
   bun build --compile src/index.ts --target="$bun_target" --outfile "dist/$out_name"
 done
 
+# --- checksums.txt ---
+#
+# Not optional, and not merely a nicety: BOTH installers download
+# checksums.txt from the release and refuse to install without a matching
+# line for their asset ("no checksum found for <asset>"). A release cut
+# without this file fails at the verification step on every machine, so it
+# is generated here rather than left as a manual step someone forgets.
+#
+# Format has to be what the installers parse:
+#   - `<sha256>  <bare-filename>` — the Windows installer matches
+#     ^[a-f0-9]+\s+\*?<asset>$, so the name must have no directory part
+#     (hence generating from inside dist/) and the digest must be lowercase
+#     hex. The optional `*` is the binary-mode marker some tools emit.
+#
+# Same tool selection as install.sh: macOS ships no sha256sum, and openssl
+# is the universal fallback.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    echo "error: no sha-256 tool found (need sha256sum, shasum, or openssl)" >&2
+    exit 1
+  fi
+}
+
+echo "→ writing dist/checksums.txt"
+(
+  cd dist
+  : > checksums.txt
+  for entry in "${targets[@]}"; do
+    out_name="${entry##*:}"
+    printf '%s  %s\n' "$(sha256_of "$out_name")" "$out_name" >> checksums.txt
+  done
+)
+
 echo ""
 echo "✓ all targets built. Artifacts in dist/:"
 ls -l dist/ | tail -n +2
 echo ""
+cat dist/checksums.txt
+echo ""
 echo "Reminder: each target needs a smoke test on matching hardware before"
 echo "being tagged as a release artifact."
+echo "Upload the six binaries AND checksums.txt — the installers fail without it."
