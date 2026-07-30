@@ -6,8 +6,8 @@
 # Steps (per AGENTS.md section 8):
 #   1. $env:PROCESSOR_ARCHITECTURE -> maps to cempala-windows-{x64,arm64}.exe.
 #   2. Invoke-WebRequest to download, Get-FileHash to verify checksum.
-#   3. Install to %LOCALAPPDATA%\Cempala\bin.
-#   4. $env:Path = "$env:LOCALAPPDATA\Cempala\bin;$env:Path" in this session
+#   3. Install to %USERPROFILE%\.cempala\bin -- NOT AppData, see step 3 below.
+#   4. $env:Path = "$env:USERPROFILE\.cempala\bin;$env:Path" in this session
 #      AND [Environment]::SetEnvironmentVariable("PATH", ..., "User") for
 #      persistence across future sessions.
 #   5. Run cempala --init to write the default config if absent.
@@ -79,23 +79,83 @@ try {
   }
   Write-Host "  [ok] checksum verified"
 
-  # --- 3. Install to %LOCALAPPDATA%\Cempala\bin ---
-  $binDir = Join-Path $env:LOCALAPPDATA "Cempala\bin"
+  # --- 3. Install to %USERPROFILE%\.cempala\bin ---
+  #
+  # NOT %LOCALAPPDATA%. That was the original location and it is actively
+  # broken for the thing cempala exists to do: some agent clients run their
+  # MCP child processes with a redirected view of AppData\Local, so a binary
+  # installed there is INVISIBLE to them. The symptom is baffling from the
+  # outside -- the client reports the server as "failed", every manual check
+  # passes, and the file is plainly on disk. What settles it is asking the
+  # child itself: a `cmd /c if exist ...` inside the spawned process reports
+  # NO for a path that unquestionably exists, and the launcher exits 3
+  # (ERROR_PATH_NOT_FOUND).
+  #
+  # %USERPROFILE%\.cempala\bin is outside AppData and visible to those
+  # children, and it matches what install.sh already uses on macOS and Linux,
+  # so both installers now agree on where cempala lives.
+  $binDir = Join-Path $env:USERPROFILE ".cempala\bin"
   New-Item -ItemType Directory -Path $binDir -Force | Out-Null
   $dest = Join-Path $binDir "cempala.exe"
+
+  # Windows locks a running executable: it can be neither deleted nor
+  # overwritten. Any agent currently holding cempala open as an MCP server owns
+  # that lock -- which is the NORMAL case when upgrading, so a plain
+  # `Move-Item -Force` fails with "Cannot create a file when that file already
+  # exists" and takes the whole install with it. FR-22 says re-running has to
+  # be safe, and that has to hold while cempala is in use, not only when it is
+  # idle.
+  #
+  # A locked exe can still be RENAMED, so move the old one aside and drop the
+  # new one into place. The running server keeps using the renamed file until
+  # it exits, which is exactly what we want -- no need to kill anyone's session
+  # to upgrade.
+  if (Test-Path $dest) {
+    $stale = "cempala.exe.old-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    try {
+      Rename-Item -Path $dest -NewName $stale -ErrorAction Stop
+    } catch {
+      Write-Error "error: could not replace $dest (in use and not renamable): $_"
+      exit 1
+    }
+  }
   Move-Item -Path "${tmpdir}\${asset}" -Destination $dest -Force
   Write-Host "-> installed to $dest"
+
+  # Sweep any superseded binaries left by earlier upgrades. They unlock once
+  # the agent session holding them exits, so this is best-effort by design:
+  # whatever is still in use simply gets cleaned up by the next run.
+  Get-ChildItem -Path $binDir -Filter "cempala.exe.old-*" -ErrorAction SilentlyContinue | ForEach-Object {
+    try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
+  }
+
+  # Clean up an install left by an earlier version in the old location, so a
+  # stale binary can't shadow this one on PATH or linger as dead weight.
+  $legacyBin = Join-Path $env:LOCALAPPDATA "Cempala\bin"
+  if (Test-Path $legacyBin) {
+    try {
+      Remove-Item -Path (Join-Path $env:LOCALAPPDATA "Cempala") -Recurse -Force -ErrorAction Stop
+      Write-Host "-> removed the previous install from $legacyBin"
+    } catch {
+      Write-Host "  ! could not remove the old install at $legacyBin (in use?); safe to delete by hand"
+    }
+  }
 
   # --- 4. PATH for this session AND future sessions ---
   $env:Path = "$binDir;$env:Path"
 
-  # Read the current user PATH, then prepend our bin dir, then persist.
+  # Read the current user PATH, drop any entry pointing at the old AppData
+  # location, then prepend our bin dir and persist.
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   if (-not $userPath) { $userPath = "" }
-  if ($userPath -notlike "*$binDir*") {
-    $newUserPath = "$binDir;$userPath"
+  $entries = @($userPath -split ';' | Where-Object { $_ -ne "" -and $_ -ne $legacyBin })
+  if ($entries -notcontains $binDir) {
+    $newUserPath = (@($binDir) + $entries) -join ';'
     [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-    Write-Host "-> appended $binDir to user PATH (restart shells to take effect)"
+    Write-Host "-> added $binDir to user PATH (restart shells to take effect)"
+  } elseif (($entries -join ';') -ne $userPath) {
+    [Environment]::SetEnvironmentVariable("Path", ($entries -join ';'), "User")
+    Write-Host "-> user PATH already contains $binDir (removed the stale entry)"
   } else {
     Write-Host "-> user PATH already contains $binDir"
   }
@@ -110,7 +170,7 @@ try {
   #
   # Takes the RESOLVED executable and a real argument array, rather than a
   # command string handed to cmd.exe. That matters now that we register an
-  # absolute path: `%LOCALAPPDATA%` sits under the user's profile, so any
+  # absolute path: the install dir sits under the user's profile, so any
   # account with a space in its name produces a path that a hand-built
   # cmd.exe string would split in two. Passing an array lets PowerShell do
   # the quoting, which it gets right.
