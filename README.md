@@ -11,6 +11,8 @@
 Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code and Codex CLI working together. Ask one for something and it pulls in the other, right there in the same session. No second window, no copy-paste, no cloud.
 
 <p>
+<a href="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml"><img alt="verify" src="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml/badge.svg" /></a>
+<a href="https://github.com/thelabs-id/cempala/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/thelabs-id/cempala?color=6366f1" /></a>
 <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-555" />
 <img alt="Runtime: Bun" src="https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-f472b6" />
 <img alt="Transport: MCP (stdio)" src="https://img.shields.io/badge/transport-MCP%20stdio-6366f1" />
@@ -73,9 +75,7 @@ If either prints an authentication error instead of `OK`, sign that CLI in — `
 
 ## Install
 
-> **`v0.1.0` publishes Windows x64 and Linux x64.** A target isn't published until the binary has actually been run on the platform it targets — a cross-compile that succeeds proves nothing about the artifact. macOS and `linux-arm64` cross-compile cleanly and are covered by the same installer; they'll ship once CI has smoke-tested them on real hardware. They're unverified, not incompatible.
-
-Linux (x64):
+Linux / macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.sh | bash
@@ -87,9 +87,17 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.ps1 | iex
 ```
 
-On Windows on ARM the installer fetches the x64 build, which runs under emulation. A native ARM64 binary is built but not yet published, for the same reason.
+| Platform | Asset | Verified on |
+|---|---|---|
+| Linux x64 | `cempala-linux-x64` | Linux 6.6 and a CI x64 runner |
+| Linux arm64 | `cempala-linux-arm64` | a real ARM64 CI runner |
+| macOS Apple Silicon | `cempala-darwin-arm64` | macOS 15 arm64 |
+| macOS Intel | `cempala-darwin-x64` | macOS 15 x86_64 |
+| Windows x64 | `cempala-windows-x64.exe` | Windows 11 |
 
-macOS, and Linux on ARM — *not yet published, see the note above.*
+A target isn't published until the binary has actually been *run* on the platform it targets — a cross-compile that succeeds proves nothing about the artifact. `scripts/smoke-test.sh` is that check, and CI runs it against the exact binaries attached to the release.
+
+On **Windows on ARM** the installer fetches the x64 build, which runs under emulation. A native `windows-arm64` binary compiles but isn't published, because there was no ARM64 Windows machine to run it on.
 
 Both installers:
 - detect OS + arch and download the matching pre-compiled binary
@@ -167,19 +175,29 @@ All paths may use `~/`; `config.ts` expands them against `os.homedir()` on read.
 ```sh
 bun install
 bun run src/index.ts        # run the server (for manual testing)
-bun test test/unit          # 155 unit tests across 10 files
+bun test                    # unit tests
 CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude
 bun x tsc --noEmit          # typecheck
 bun build --compile src/index.ts --outfile dist/cempala.exe
 ```
 
-Build all six release targets:
+Build all six release targets, with a `checksums.txt` the installers can verify against:
 
 ```sh
 bash scripts/build-all.sh
 ```
 
-Targets: `bun-darwin-{arm64,x64}`, `bun-linux-{arm64,x64}`, `bun-windows-{arm64,x64}.exe`. Each target needs a smoke test on real matching hardware before being tagged as a release artifact (a cross-compiled binary cannot be run on the build host).
+Targets: `bun-darwin-{arm64,x64}`, `bun-linux-{arm64,x64}`, `bun-windows-{arm64,x64}.exe`.
+
+A cross-compiled binary can't be run on the build host, so a successful build says nothing about the artifact. Before a target is published it has to pass:
+
+```sh
+bash scripts/smoke-test.sh dist/cempala-linux-x64
+```
+
+That drives the real MCP protocol — handshake, `tools/list`, and a message round-tripped through SQLite — rather than just checking `--version`, since "the binary starts" isn't the interesting failure mode. It runs in a temp `HOME`, so it never touches your real `~/.cempala`.
+
+`.github/workflows/verify.yml` runs the suite on Linux, macOS and Windows and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
 
 ## Architecture
 
