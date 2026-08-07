@@ -199,33 +199,52 @@ strip_legacy() {
   local tmp
   tmp=$(mktemp "${file}.cempala.XXXXXX") || return 2
 
-  # Exact whole-line equality, never a substring or pattern: the only lines
-  # that may be deleted are ones byte-identical to what this installer itself
-  # wrote. Anything a human typed — even something that merely looks similar —
-  # is left alone.
-  if ! awk -v marker="$rc_marker" -v legacy="$rc_legacy" '
-    $0 == marker { next }
-    $0 == legacy { next }
-    { print }
+  # Remove the marker line only when it is the marker OF A LEGACY BLOCK — that
+  # is, when the very next line is the legacy export. Deleting every marker
+  # unconditionally is wrong for a file holding both an old block and a current
+  # one: the current block would lose its marker, be left orphaned in the file,
+  # and then a fresh copy would be appended below it.
+  #
+  # Whole-line equality throughout, never a substring or a pattern. The only
+  # lines that may be deleted are ones byte-identical to what this installer
+  # itself wrote; anything a human typed, even something that looks similar,
+  # stays.
+  #
+  # The count of what was dropped goes to a side file so the check below is
+  # measuring the same pass that produced the output, rather than a second
+  # implementation of the same rule that could drift from it.
+  local dropped="${tmp}.dropped"
+  if ! awk -v marker="$rc_marker" -v legacy="$rc_legacy" -v dropfile="$dropped" '
+    { line[NR] = $0 }
+    END {
+      n = 0
+      for (i = 1; i <= NR; i++) {
+        if (line[i] == marker && line[i + 1] == legacy) { n += 2; i++; continue }
+        if (line[i] == legacy) { n++; continue }
+        print line[i]
+      }
+      print n > dropfile
+    }
   ' "$file" > "$tmp"; then
-    rm -f "$tmp"
+    rm -f "$tmp" "$dropped"
     return 2
   fi
 
-  # Verify that exactly the intended lines went, and nothing else. Counting
-  # them rather than assuming a fixed number matters: a file that accumulated
-  # the block twice — two upgrades through different installer versions —
-  # legitimately loses four lines, and a fixed "no more than three" guard
-  # would refuse to migrate it and silently leave BOTH old exports in place.
+  # Verify that exactly the lines that pass reported went, and nothing else.
+  # Counting rather than assuming a fixed number matters: a file that
+  # accumulated the block twice — two upgrades through different installer
+  # versions — legitimately loses four lines, and a fixed "no more than three"
+  # guard would refuse to migrate it and silently leave BOTH old exports in
+  # place.
   #
-  # awk does the counting on both sides, not `wc -l`, so a file whose last
-  # line has no trailing newline is counted the same way in both.
+  # awk does the counting on both sides, not `wc -l`, so a file whose last line
+  # has no trailing newline is counted the same way in both.
   local before removed after
   before=$(awk 'END { print NR + 0 }' "$file")
-  removed=$(awk -v marker="$rc_marker" -v legacy="$rc_legacy" \
-    '$0 == marker || $0 == legacy { n++ } END { print n + 0 }' "$file")
+  removed=$(cat "$dropped" 2>/dev/null || echo 0)
   after=$(awk 'END { print NR + 0 }' "$tmp")
-  if [ "$after" -ne "$(( before - removed ))" ]; then
+  rm -f "$dropped"
+  if [ "$removed" -eq 0 ] || [ "$after" -ne "$(( before - removed ))" ]; then
     rm -f "$tmp"
     return 2
   fi
@@ -282,8 +301,24 @@ append_rc() {
     return 0
   fi
 
-  if [ -z "$migrated" ] && grep -qF "$rc_marker" "$file"; then
-    echo "→ PATH export already present in $file"
+  # Ask whether a current block is present AFTER the migration, not instead of
+  # it. A file can hold both an old block and a current one — run an old
+  # installer, then a new one, then an old one again — and there the migration
+  # removes the legacy pair while a perfectly good current block survives.
+  # Treating "we migrated something" as "so there is nothing here now" would
+  # append a second copy alongside it.
+  #
+  # -x for the same reason strip_legacy uses it: a substring match would treat
+  # a line that merely mentions the marker — someone's own note, or a
+  # commented-out "# # cempala installer …" — as proof the block is present,
+  # and the PATH export would then never be written at all.
+  if grep -qFx "$rc_marker" "$file"; then
+    if [ -n "$migrated" ]; then
+      echo "→ removed the PATH export an earlier installer left in $file"
+      echo "  (a current one was already there)"
+    else
+      echo "→ PATH export already present in $file"
+    fi
     return 0
   fi
   # Single quotes are the point, not an oversight: $HOME and $PATH have to
