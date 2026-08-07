@@ -184,7 +184,13 @@ rc_legacy='export PATH="$HOME/.cempala/bin:$PATH"'
 # old line and should hear about it.
 strip_legacy() {
   local file="$1"
-  grep -qF "$rc_legacy" "$file" || return 1
+  # -x, so detection uses the same whole-line equality the removal below does.
+  # A substring match would fire on a line that merely CONTAINS the old export
+  # — someone's commented-out `# export PATH="$HOME/.cempala/bin:$PATH"` — and
+  # then awk, matching whole lines, would find nothing to remove but the marker
+  # of the current block. That leaves the block orphaned and appends a fresh
+  # one, and it does it again on every re-run.
+  grep -qFx "$rc_legacy" "$file" || return 1
 
   # Every failure branch below returns 1 and leaves the file untouched. This
   # function runs inside an `if`, which disables `set -e` for everything it

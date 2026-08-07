@@ -652,7 +652,48 @@ run_all_cases() {
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 16. A home directory with a space in it — the reason flags are passed as
+  # 16. A line that merely CONTAINS the old export — a commented-out copy —
+  #     must not be mistaken for the real thing. Detection has to use the same
+  #     whole-line equality the removal does, or it strips the current block's
+  #     marker, finds nothing else to remove, and appends a duplicate block on
+  #     every single re-run.
+  begin_case "commented-out legacy line next to a current block — left alone"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# an old line I keep around for reference:"
+    # shellcheck disable=SC2016
+    echo '# export PATH="$HOME/.cempala/bin:$PATH"'
+    echo ""
+    echo "# cempala installer — added by install.sh"
+    # The current block, verbatim. shellcheck disable=SC2016 — literals.
+    # shellcheck disable=SC2016
+    echo 'case ":$PATH:" in'
+    # shellcheck disable=SC2016
+    echo '  *":$HOME/.cempala/bin:"*) ;;'
+    # shellcheck disable=SC2016
+    echo '  *) PATH="$HOME/.cempala/bin${PATH:+:$PATH}"; export PATH ;;'
+    echo 'esac'
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/zsh"
+  before_rc=$(cat "$home_dir/.zshrc")
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "recognised as already current" "$out" "already present"
+  assert_eq "still exactly one block" \
+    "$(count_matches "$home_dir/.zshrc" 'cempala installer')" "1"
+  assert_eq "file untouched" "$(cat "$home_dir/.zshrc")" "$before_rc"
+
+  # And again, to prove it does not accumulate a block per run.
+  run_installer
+  assert_eq "second re-run still one block" \
+    "$(count_matches "$home_dir/.zshrc" 'cempala installer')" "1"
+  assert_eq "file still untouched" "$(cat "$home_dir/.zshrc")" "$before_rc"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 17. A home directory with a space in it — the reason flags are passed as
   #     real arguments instead of one word-split string.
   begin_case "home directory containing a space"
   home_dir="$(mktemp -d)/My Home"
