@@ -224,13 +224,12 @@ rc_track() {
 # rc_filter <src> <dst> <dropfile> — copy src to dst without any cempala block.
 #
 # Removes, by exact whole-line equality only:
-#   - the marker followed by either known body,
-#   - either body standing alone, its marker lost to a hand edit or to the
-#     bug in an earlier version of this installer,
-#   - one blank line immediately above a removed block, so repeated upgrades
-#     do not accumulate blank lines.
-# A marker followed by something we do not recognise is LEFT ALONE — that is
-# someone's own edit, and guessing at it is how you destroy a shell config.
+#   - the marker line together with the known body directly beneath it,
+#   - one blank line immediately above such a block, so repeated upgrades do
+#     not accumulate blank lines.
+# Nothing else. A marker followed by something unrecognised is LEFT ALONE, and
+# so is a body with no marker above it — both are someone's own edit, and
+# guessing at them is how you destroy a shell config.
 #
 # Writes the number of dropped lines to <dropfile>. Returns non-zero if awk
 # failed or the line counts do not add up.
@@ -298,12 +297,19 @@ rc_filter() {
           continue
         }
         out[++no] = line[i]
+        srcidx[no] = i
       }
       for (k = 1; k <= no; k++) {
         # Reproduce the absence of a final newline rather than quietly adding
         # one. Rewriting a file to remove our block should change our block and
         # nothing else, down to the last byte.
-        if (k == no && no_final_nl) printf "%s", out[k]
+        #
+        # It applies only when the line that ends the OUTPUT is the same line
+        # that ended the INPUT. If the unterminated last line was itself part
+        # of a block we just removed, the line now at the end is a different
+        # one that did end in a newline, and stripping its newline would be a
+        # change to a line we were never asked to touch.
+        if (k == no && no_final_nl && srcidx[no] == NR) printf "%s", out[k]
         else print out[k]
       }
       print n > dropfile
