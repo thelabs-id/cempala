@@ -103,11 +103,19 @@ Both installers:
 - detect OS + arch and download the matching pre-compiled binary
 - verify a SHA-256 checksum before doing anything with the file
 - drop the binary into `~/.cempala/bin` — the same place on every platform (`%USERPROFILE%\.cempala\bin` on Windows), deliberately **not** under `AppData`, which some agent clients cannot see from the processes they spawn
-- add it to `PATH` for the current shell **and** for future shells
+- add it to `PATH` for the current shell **and** for future shells — on Windows via the user `PATH` variable; on macOS and Linux by writing to the startup file your shell actually reads (see below)
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
 
-The script is idempotent. Re-running it (e.g. to upgrade) overwrites the binary in place, leaves an existing `config.toml` untouched, and re-points the MCP registrations at the new binary without duplicating them.
+On macOS and Linux "the file your shell actually reads" is `~/.zshrc` for zsh. For bash it's *two* files — a login one (`~/.bash_profile`, or whichever of `~/.bash_login` / `~/.profile` you already use) **and** `~/.bashrc` — because bash reads a different file depending on whether the shell is a login shell, and which one your terminal opens varies by platform. Picking one means being wrong for a lot of people. The snippet is guarded, so being read from both adds the directory to `PATH` exactly once.
+
+The script is idempotent. Re-running it (e.g. to upgrade) leaves your machine in the state a fresh install would:
+
+- **The binary is replaced even while it's running** — the normal case when upgrading, since an agent is usually holding cempala open as an MCP server. It's staged beside the target and renamed into place, so a running server keeps the file it already opened until it exits and nothing has to be killed.
+- **Exactly one PATH block survives**, in the right file. A block written by an older version is replaced rather than stepped over, and one left behind in a file the installer no longer writes to is removed. A file that already holds the current block is left byte-identical.
+- `config.toml` is left untouched, and the MCP registrations are re-pointed at the new binary without duplicating them.
+
+Editing your shell config is the part with the least room for error, so on macOS and Linux the rules are narrow: a block is only ever removed together with the marker comment the installer itself wrote. Matching text without that marker — in a heredoc, a quoted string, or a line you wrote yourself — is left alone, and so are your line endings and a missing final newline. An rc file that's a symlink into a dotfiles repo is written *through*, so it stays a symlink.
 
 ## The 8 MCP tools
 
@@ -177,6 +185,7 @@ bun install
 bun run src/index.ts        # run the server (for manual testing)
 bun test                    # unit tests
 CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude
+bash scripts/test-install.sh                      # installer tests
 bun x tsc --noEmit          # typecheck
 bun build --compile src/index.ts --outfile dist/cempala.exe
 ```
@@ -197,7 +206,15 @@ bash scripts/smoke-test.sh dist/cempala-linux-x64
 
 That drives the real MCP protocol — handshake, `tools/list`, and a message round-tripped through SQLite — rather than just checking `--version`, since "the binary starts" isn't the interesting failure mode. It runs in a temp `HOME`, so it never touches your real `~/.cempala`.
 
-`.github/workflows/verify.yml` runs the suite on Linux, macOS and Windows and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
+The installer is the one piece the Bun suite can't reach, and it's also the first thing every user runs, so it has its own suite:
+
+```sh
+bash scripts/test-install.sh
+```
+
+It drives the real `install.sh` against a stubbed `curl` and stub agent CLIs in a throwaway `HOME`, and runs every case under `/bin/bash` as well as the bash on your `PATH`. Running it under the *oldest* bash you support is the point, not a detail: macOS still ships bash 3.2, which is what `curl … | bash` gets there, and it differs from any bash you're likely to have locally — an empty array expanded under `set -u` is an error rather than nothing. CI runs this on macOS as well as Linux for exactly that reason.
+
+`.github/workflows/verify.yml` runs the suite on Linux, macOS and Windows, runs the installer tests on Linux and macOS, and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
 
 ## Architecture
 
