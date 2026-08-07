@@ -595,7 +595,64 @@ run_all_cases() {
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 14. A home directory with a space in it — the reason flags are passed as
+  # 14. An rc file that accumulated the block TWICE — two upgrades through
+  #     different installer versions. Four lines have to go, so a guard that
+  #     assumed a fixed maximum would refuse the migration and silently leave
+  #     BOTH unsafe exports in place.
+  begin_case "rc file with two legacy blocks — both migrated"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# user config"
+    echo "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+    echo "# more user config"
+    echo "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/zsh"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "migrated rather than skipped" "$out" "replaced the PATH export"
+  # shellcheck disable=SC2016
+  assert_eq "both old lines gone" \
+    "$(count_matches "$home_dir/.zshrc" 'export PATH="\$HOME/.cempala/bin:\$PATH"')" "0"
+  assert_eq "exactly one block remains" \
+    "$(count_matches "$home_dir/.zshrc" 'cempala installer')" "1"
+  assert_contains "user content kept" "$(cat "$home_dir/.zshrc")" "# more user config"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 15. A file already sitting at the backup name must not be clobbered. A
+  #     predictable backup path is one the user may already be using, and the
+  #     migration would overwrite it and then delete it on the way out.
+  begin_case "pre-existing file at the backup name — not touched"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+  } > "$home_dir/.zshrc"
+  echo "PLEASE DO NOT DELETE ME" > "$home_dir/.zshrc.cempala-backup"
+  shell_env="/bin/zsh"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "migration still happened" "$out" "replaced the PATH export"
+  if [ -f "$home_dir/.zshrc.cempala-backup" ]; then
+    assert_eq "the user's file survived intact" \
+      "$(cat "$home_dir/.zshrc.cempala-backup")" "PLEASE DO NOT DELETE ME"
+  else
+    fail "the user's file survived intact" "it was deleted"
+  fi
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 16. A home directory with a space in it — the reason flags are passed as
   #     real arguments instead of one word-split string.
   begin_case "home directory containing a space"
   home_dir="$(mktemp -d)/My Home"
