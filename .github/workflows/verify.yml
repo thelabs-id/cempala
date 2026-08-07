@@ -51,6 +51,23 @@ jobs:
         # AC-12 needs a real symlink. On Windows that requires Developer Mode
         # or elevation; the test skips loudly rather than passing silently.
 
+  installer:
+    name: installer tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      # macos-15 is the load-bearing entry, not a nicety. `curl … | bash` on a
+      # Mac runs bash 3.2, whose handling of empty arrays under `set -u`
+      # differs from every bash a developer is likely to have locally — that
+      # exact difference once broke the installer for every macOS user after
+      # the claude registration and before the codex one.
+      - name: Installer tests
+        run: bash scripts/test-install.sh
+
   build:
     name: build all targets
     runs-on: ubuntu-latest

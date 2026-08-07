@@ -14,6 +14,7 @@
     "build:all": "bash scripts/build-all.sh",
     "test": "bun test test/unit",
     "test:integration": "CEMPALA_INTEGRATION=1 bun test test/integration",
+    "test:install": "bash scripts/test-install.sh",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
