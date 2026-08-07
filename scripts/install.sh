@@ -177,6 +177,11 @@ rc_marker='# cempala installer — added by install.sh'
 rc_legacy='export PATH="$HOME/.cempala/bin:$PATH"'
 
 # strip_legacy <file> — remove what an earlier installer wrote, if present.
+#
+# Exit status: 0 migrated, 1 nothing to migrate, 2 legacy present but the
+# migration could not be completed safely. The caller has to tell 2 from 1:
+# both leave the file unmodified, but only 2 means the user is still on the
+# old line and should hear about it.
 strip_legacy() {
   local file="$1"
   grep -qF "$rc_legacy" "$file" || return 1
@@ -186,7 +191,7 @@ strip_legacy() {
   # calls, so each step is checked by hand — an unnoticed failure here would
   # mean rewriting a shell config from a half-built temp file.
   local tmp
-  tmp=$(mktemp "${file}.cempala.XXXXXX") || return 1
+  tmp=$(mktemp "${file}.cempala.XXXXXX") || return 2
 
   # Exact whole-line equality, never a substring or pattern: the only lines
   # that may be deleted are ones byte-identical to what this installer itself
@@ -198,19 +203,25 @@ strip_legacy() {
     { print }
   ' "$file" > "$tmp"; then
     rm -f "$tmp"
-    return 1
+    return 2
   fi
 
-  # Refuse to proceed if that removed more than the three lines it should
-  # have. Leaving a stale export in place is a far better outcome than
-  # truncating someone's shell config, so when the result looks wrong, the
-  # cautious branch is to do nothing at all.
-  local before after
-  before=$(wc -l < "$file")
-  after=$(wc -l < "$tmp")
-  if [ "$after" -lt "$(( before - 3 ))" ]; then
+  # Verify that exactly the intended lines went, and nothing else. Counting
+  # them rather than assuming a fixed number matters: a file that accumulated
+  # the block twice — two upgrades through different installer versions —
+  # legitimately loses four lines, and a fixed "no more than three" guard
+  # would refuse to migrate it and silently leave BOTH old exports in place.
+  #
+  # awk does the counting on both sides, not `wc -l`, so a file whose last
+  # line has no trailing newline is counted the same way in both.
+  local before removed after
+  before=$(awk 'END { print NR + 0 }' "$file")
+  removed=$(awk -v marker="$rc_marker" -v legacy="$rc_legacy" \
+    '$0 == marker || $0 == legacy { n++ } END { print n + 0 }' "$file")
+  after=$(awk 'END { print NR + 0 }' "$tmp")
+  if [ "$after" -ne "$(( before - removed ))" ]; then
     rm -f "$tmp"
-    return 1
+    return 2
   fi
 
   # Copy the contents back rather than renaming over the original. An rc file
@@ -222,15 +233,22 @@ strip_legacy() {
   # The backup exists for the window between truncating $file and finishing
   # the write. It is a few bytes and one syscall against the possibility of
   # leaving a user with no working shell config at all.
-  local backup="${file}.cempala-backup"
+  #
+  # It comes from mktemp rather than a fixed "$file.cempala-backup" name. A
+  # predictable name is one the user might already have — and we would then
+  # overwrite their file and delete it on the way out. Worse, if that name
+  # happened to be a symlink, the write would land on whatever it pointed at.
+  # mktemp creates a fresh regular file that is unambiguously ours to remove.
+  local backup
+  backup=$(mktemp "${file}.cempala-bak.XXXXXX") || { rm -f "$tmp"; return 2; }
   if ! cp "$file" "$backup"; then
-    rm -f "$tmp"
-    return 1
+    rm -f "$tmp" "$backup"
+    return 2
   fi
   if ! cat "$tmp" > "$file"; then
     cat "$backup" > "$file" || true
     rm -f "$tmp" "$backup"
-    return 1
+    return 2
   fi
   rm -f "$tmp" "$backup"
   return 0
@@ -245,9 +263,17 @@ append_rc() {
     created=1
   fi
 
-  local migrated=""
-  if strip_legacy "$file"; then
+  local migrated="" migrate_rc=0
+  strip_legacy "$file" || migrate_rc=$?
+  if [ "$migrate_rc" -eq 0 ]; then
     migrated=1
+  elif [ "$migrate_rc" -eq 2 ]; then
+    # The old line is still there and still works — it only misbehaves when
+    # PATH is empty. Appending a second block on top of it would be worse than
+    # saying so and leaving it alone.
+    echo "  ! could not rewrite the PATH export in $file; left it untouched"
+    echo "    (it still works; re-run this installer once the file is writable)"
+    return 0
   fi
 
   if [ -z "$migrated" ] && grep -qF "$rc_marker" "$file"; then
