@@ -947,8 +947,11 @@ run_all_cases() {
   assert_contains "the CRLF block was recognised" "$out" "removed a stale cempala"
   assert_eq "no cempala lines left" \
     "$(count_matches "$home_dir/.zshrc" 'cempala')" "0"
-  assert_eq "surviving lines kept their CRLF" \
-    "$(od -An -c < "$home_dir/.zshrc" | tr -d ' \n' | grep -c '\\r')" "1"
+  # Count CR BYTES, not matching lines. The previous form flattened od's
+  # output to a single line, so grep -c answered 1 whether one CR survived or
+  # five — mixed or half-mangled endings would have passed.
+  assert_eq "both surviving lines kept their CRLF" \
+    "$(LC_ALL=C tr -cd '\r' < "$home_dir/.zshrc" | wc -c | tr -d ' ')" "2"
   rm -rf "$(dirname "$home_dir")"
   teardown
 
@@ -985,7 +988,34 @@ run_all_cases() {
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 26. A home directory with a space in it — the reason flags are passed as
+  # 26. The other half of the final-newline case: the unterminated last line is
+  #     itself part of the block being removed. The line left at the end is a
+  #     different one that DID end in a newline, so it must keep it — the
+  #     "file had no final newline" fact belongs to the original last line, not
+  #     to whichever line ends up last.
+  begin_case "block at EOF with no final newline — survivor keeps its newline"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    printf '%s\n' "# user config that ends properly"
+    printf '%s\n' "# cempala installer — added by install.sh"
+    # No trailing newline on the block's last line.
+    # shellcheck disable=SC2016
+    printf '%s' 'export PATH="$HOME/.cempala/bin:$PATH"'
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/bash"   # so .zshrc is swept rather than rewritten
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "it was swept" "$out" "removed a stale cempala"
+  assert_eq "what remains is the user's line" \
+    "$(cat "$home_dir/.zshrc")" "# user config that ends properly"
+  assert_eq "and it kept its trailing newline" \
+    "$(tail -c 1 "$home_dir/.zshrc" | od -An -c | tr -d ' \n')" "\\n"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 27. A home directory with a space in it — the reason flags are passed as
   #     real arguments instead of one word-split string.
   begin_case "home directory containing a space"
   home_dir="$(mktemp -d)/My Home"
