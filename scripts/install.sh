@@ -49,9 +49,22 @@ fi
 
 tmpdir=$(mktemp -d)
 staged=""
+# Scratch files created while rewriting a shell rc file. They live beside the
+# rc file itself (so a rename stays on one filesystem, and so a symlinked rc
+# file is written through rather than replaced), which means they are NOT under
+# $tmpdir and need tracking of their own. Without this, a Ctrl-C at the wrong
+# moment leaves .zshrc.cempala.XXXXXX sitting in the user's home directory.
+rc_scratch=""
 cleanup() {
   rm -rf "$tmpdir"
   if [ -n "$staged" ]; then rm -f "$staged"; fi
+  if [ -n "$rc_scratch" ]; then
+    # Deliberately unquoted: this is a newline-separated list, not one path.
+    # Home directories with spaces are handled by the IFS below.
+    local IFS='
+'
+    for f in $rc_scratch; do rm -f "$f"; done
+  fi
 }
 trap cleanup EXIT
 
@@ -197,6 +210,17 @@ rc_body_legacy=(
   'export PATH="$HOME/.cempala/bin:$PATH"'
 )
 
+# rc_track <path>... — remember a scratch file so the EXIT trap removes it if
+# this run is interrupted. Each function still deletes its own files on the
+# normal path; this is the backstop for the paths that never get there.
+rc_track() {
+  while [ "$#" -gt 0 ]; do
+    rc_scratch="${rc_scratch}${rc_scratch:+
+}$1"
+    shift
+  done
+}
+
 # rc_filter <src> <dst> <dropfile> — copy src to dst without any cempala block.
 #
 # Removes, by exact whole-line equality only:
@@ -212,9 +236,16 @@ rc_body_legacy=(
 # failed or the line counts do not add up.
 rc_filter() {
   local src="$1" dst="$2" dropfile="$3"
-  local cur leg before after dropped
+  local cur leg before after dropped no_final_nl
   cur=$(printf '%s\n' "${rc_body_current[@]}")
   leg=$(printf '%s\n' "${rc_body_legacy[@]}")
+
+  # Does the source end without a newline? awk cannot tell, and its `print`
+  # would add one, so the answer has to come from outside and be passed in.
+  no_final_nl=""
+  if [ -s "$src" ] && [ "$(tail -c 1 "$src" | od -An -c | tr -d ' \n')" != "\\n" ]; then
+    no_final_nl=1
+  fi
 
   # The bodies travel through the ENVIRONMENT, not `awk -v`. A -v assignment
   # cannot carry a literal newline — BSD awk fails outright with "newline in
@@ -222,10 +253,15 @@ rc_filter() {
   # a multi-line block of shell code needs. Prefixed assignments like these
   # apply to this one command and do not leak into the rest of the script.
   CEMPALA_RC_MARKER="$rc_marker" CEMPALA_RC_CUR="$cur" CEMPALA_RC_LEG="$leg" \
-  awk -v dropfile="$dropfile" '
+  awk -v dropfile="$dropfile" -v no_final_nl="$no_final_nl" '
+    # bare() drops a trailing CR so a file that has been through a Windows
+    # editor still matches. Comparison only — what gets printed is always the
+    # original bytes, so line endings elsewhere in the file are left as they
+    # were found.
+    function bare(s) { sub(/\r$/, "", s); return s }
     function matches(start, arr, n,   k) {
       for (k = 1; k <= n; k++)
-        if (line[start + k - 1] != arr[k]) return 0
+        if (bare(line[start + k - 1]) != arr[k]) return 0
       return 1
     }
     BEGIN {
@@ -237,22 +273,39 @@ rc_filter() {
     END {
       no = 0; n = 0
       for (i = 1; i <= NR; i++) {
+        # A body is only ever removed together with the marker line above it.
+        #
+        # Matching a body on its own is not safe, however tempting it is as a
+        # way to tidy up after a hand edit. These are ordinary lines of shell,
+        # and identical text can legitimately appear inside a heredoc, a quoted
+        # string, or simply because someone wrote the same export themselves —
+        # deleting it would corrupt a file this installer does not own. The
+        # marker is a comment only this installer writes, and requiring it is
+        # what makes a match evidence rather than a guess.
+        #
+        # The cost is that a block orphaned from its marker stays. That is
+        # cosmetic: the block is guarded, so it sets PATH at most once and the
+        # current block added below is a no-op next to it.
         drop = 0
-        if (line[i] == marker) {
+        if (bare(line[i]) == marker) {
           if (matches(i + 1, C, nc))      drop = 1 + nc
           else if (matches(i + 1, L, nl)) drop = 1 + nl
         }
-        if (!drop && matches(i, C, nc)) drop = nc
-        if (!drop && matches(i, L, nl)) drop = nl
         if (drop) {
-          if (no > 0 && out[no] == "") { no--; n++ }
+          if (no > 0 && bare(out[no]) == "") { no--; n++ }
           n += drop
           i += drop - 1
           continue
         }
         out[++no] = line[i]
       }
-      for (k = 1; k <= no; k++) print out[k]
+      for (k = 1; k <= no; k++) {
+        # Reproduce the absence of a final newline rather than quietly adding
+        # one. Rewriting a file to remove our block should change our block and
+        # nothing else, down to the last byte.
+        if (k == no && no_final_nl) printf "%s", out[k]
+        else print out[k]
+      }
       print n > dropfile
     }
   ' "$src" > "$dst" || return 1
@@ -272,9 +325,19 @@ rc_filter() {
 # file, detaching it from the repo the user manages it in. The backup covers
 # the window between truncating and finishing the write, and comes from mktemp
 # because a predictable name is one the user might already be using.
+#
+# That choice is a real trade: copying is not atomic the way a rename is, so an
+# edit made in the seconds between filtering and writing back would be lost,
+# and there is no lock preventing two installers from racing each other. Both
+# are accepted deliberately. Preserving a dotfiles symlink matters to people
+# every time they upgrade; the race needs someone to be editing their shell
+# config, or running two installers, during a window a few milliseconds wide.
+# A lock file would also have to survive being abandoned by a killed installer,
+# which is its own way to leave a user stuck.
 rc_write_back() {
   local file="$1" new="$2" backup
   backup=$(mktemp "${file}.cempala-bak.XXXXXX") || return 1
+  rc_track "$backup"
   if ! cp "$file" "$backup"; then
     rm -f "$backup"
     return 1
@@ -299,6 +362,7 @@ ensure_rc() {
   local tmp dropfile
   tmp=$(mktemp "${file}.cempala.XXXXXX") || { rc_warn "$file"; return 0; }
   dropfile="${tmp}.dropped"
+  rc_track "$tmp" "$dropfile"
 
   if ! rc_filter "$file" "$tmp" "$dropfile"; then
     rm -f "$tmp" "$dropfile"
@@ -359,6 +423,7 @@ purge_rc() {
   local tmp dropfile dropped
   tmp=$(mktemp "${file}.cempala.XXXXXX") || return 0
   dropfile="${tmp}.dropped"
+  rc_track "$tmp" "$dropfile"
   if ! rc_filter "$file" "$tmp" "$dropfile"; then
     rm -f "$tmp" "$dropfile"
     return 0
@@ -372,7 +437,7 @@ purge_rc() {
   fi
   if rc_write_back "$file" "$tmp"; then
     echo "→ removed a stale cempala PATH export from $file"
-    echo "  (your shell does not read it; the current one is above)"
+    echo "  (an older installer put it there; the current one is in ${rc_targets[0]})"
   fi
   rm -f "$tmp"
 }
