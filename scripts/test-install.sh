@@ -821,20 +821,29 @@ run_all_cases() {
   assert_same_file "unrelated file untouched" \
     "$(dirname "$home_dir")/zshrc-before" "$home_dir/.zshrc"
 
+  # Assert the login target actually HOLDS the block before claiming a re-run
+  # recognised it. Without this, "already present" could be coming from
+  # .bashrc alone and the byte comparison would merely confirm an empty
+  # .bash_profile had not changed.
+  assert_eq "login target really has the block" \
+    "$(count_matches "$home_dir/.bash_profile" 'cempala installer')" "1"
   cp "$home_dir/.bash_profile" "$(dirname "$home_dir")/bp-before"
   run_installer
   assert_eq "second run exit status" "$rc" "0"
   assert_not_contains "still nothing to sweep" "$out" "removed a stale cempala"
-  assert_contains "recognised as current" "$out" "already present"
+  assert_contains "recognised as current" "$out" "already present in $home_dir/.bash_profile"
   assert_same_file "target file byte-identical on re-run" \
     "$(dirname "$home_dir")/bp-before" "$home_dir/.bash_profile"
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 21. An orphaned current block — marker lost to a hand edit, or to the bug
-  #     an earlier version of this installer had — is recognised and replaced
-  #     rather than left to sit alongside a freshly appended copy.
-  begin_case "orphaned block with no marker — cleaned up, not duplicated"
+  # 21. A body whose marker is gone is LEFT ALONE. It is ordinary shell code —
+  #     the same lines can appear in a heredoc, in a quoted string, or because
+  #     someone wrote that export themselves — and only the marker makes a
+  #     match evidence rather than a guess. The cost is a leftover block, and
+  #     the cost is cosmetic: both blocks are guarded, so PATH gains the
+  #     directory exactly once.
+  begin_case "body with no marker — left alone, not guessed at"
   home_dir="$(mktemp -d)/home"
   mkdir -p "$home_dir"
   {
@@ -851,16 +860,132 @@ run_all_cases() {
   setup_world
   run_installer
   assert_eq "exit status" "$rc" "0"
-  # shellcheck disable=SC2016  # literal regex, must not expand here
-  assert_eq "exactly one block" \
-    "$(count_matches "$home_dir/.zshrc" '^case ":\$PATH:" in')" "1"
-  assert_eq "and it has its marker" \
+  assert_eq "the unmarked block was not touched" \
+    "$(count_matches "$home_dir/.zshrc" '^esac')" "2"
+  assert_eq "and a marked one was added" \
     "$(count_matches "$home_dir/.zshrc" '^# cempala installer')" "1"
   assert_contains "user config kept" "$(cat "$home_dir/.zshrc")" "# user config"
+  # The guard is what makes leaving it harmless: PATH gains the dir once.
+  # shellcheck disable=SC2016
+  p=$(env -i HOME="$home_dir" PATH="" /bin/sh -c '. "$HOME/.zshrc"; echo "$PATH"')
+  assert_eq "PATH still has it exactly once" "$p" "$home_dir/.cempala/bin"
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 22. A home directory with a space in it — the reason flags are passed as
+  # 22. The same rule protects a heredoc. Documentation that happens to quote
+  #     the block must survive untouched — this is the case that makes
+  #     marker-only matching non-negotiable.
+  begin_case "block text inside a heredoc — not touched"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "cempala_help() {"
+    echo "  cat <<'DOC'"
+    echo "What the installer adds:"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+    echo "DOC"
+    echo "}"
+  } > "$home_dir/.zshrc"
+  cp "$home_dir/.zshrc" "$(dirname "$home_dir")/heredoc-before"
+  shell_env="/bin/zsh"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  # shellcheck disable=SC2016
+  assert_eq "the heredoc line survived" \
+    "$(count_matches "$home_dir/.zshrc" 'export PATH="\$HOME/.cempala/bin:\$PATH"')" "1"
+  assert_contains "the heredoc still closes" "$(cat "$home_dir/.zshrc")" "DOC"
+  assert_eq "and the block was still added" \
+    "$(count_matches "$home_dir/.zshrc" '^# cempala installer')" "1"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 23. A file with no trailing newline must not silently gain one. Rewriting
+  #     a file to remove our block should change our block and nothing else,
+  #     down to the last byte.
+  begin_case "rc file with no trailing newline — byte preserved"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    printf '%s\n' "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    printf '%s\n' 'export PATH="$HOME/.cempala/bin:$PATH"'
+    printf '%s' "# no newline at the end of this file"
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/bash"   # so .zshrc is SWEPT, not rewritten with a new block
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "it was swept" "$out" "removed a stale cempala"
+  # 'e' is the last character of "…this file"; a trailing newline would show
+  # as \n here, so this is the check that none was added.
+  assert_eq "the last byte is still not a newline" \
+    "$(tail -c 1 "$home_dir/.zshrc" | od -An -c | tr -d ' \n')" "e"
+  assert_eq "content is exactly what remained" \
+    "$(cat "$home_dir/.zshrc")" "# no newline at the end of this file"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 24. A block written with CRLF line endings — the file has been through a
+  #     Windows editor — is still recognised, and the file's other lines keep
+  #     the endings they had.
+  begin_case "CRLF rc file — block recognised, endings preserved"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    printf '# my config\r\n'
+    printf '# cempala installer — added by install.sh\r\n'
+    # shellcheck disable=SC2016
+    printf 'export PATH="$HOME/.cempala/bin:$PATH"\r\n'
+    printf '# tail line\r\n'
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/bash"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "the CRLF block was recognised" "$out" "removed a stale cempala"
+  assert_eq "no cempala lines left" \
+    "$(count_matches "$home_dir/.zshrc" 'cempala')" "0"
+  assert_eq "surviving lines kept their CRLF" \
+    "$(od -An -c < "$home_dir/.zshrc" | tr -d ' \n' | grep -c '\\r')" "1"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 25. When the rewrite cannot be done, the file must be left exactly as it
+  #     was, the installer must say so rather than claim success, and no
+  #     scratch file may be left lying in the user's home directory.
+  begin_case "unwritable rc file — untouched, reported, nothing left behind"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+  } > "$home_dir/.zshrc"
+  cp "$home_dir/.zshrc" "$(dirname "$home_dir")/ro-before"
+  chmod 444 "$home_dir/.zshrc"
+  shell_env="/bin/zsh"
+  setup_world
+  run_installer
+  if [ "$(id -u)" = "0" ]; then
+    skip "running as root — a read-only file would not stop the write"
+  else
+    assert_eq "installer still succeeded overall" "$rc" "0"
+    assert_contains "it said what happened" "$out" "could not update the PATH export"
+    assert_same_file "the file is untouched" \
+      "$(dirname "$home_dir")/ro-before" "$home_dir/.zshrc"
+    if ls "$home_dir"/.zshrc.cempala* >/dev/null 2>&1; then
+      fail "no scratch files left behind" "$(ls -a "$home_dir")"
+    else
+      pass "no scratch files left behind"
+    fi
+  fi
+  chmod 644 "$home_dir/.zshrc"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 26. A home directory with a space in it — the reason flags are passed as
   #     real arguments instead of one word-split string.
   begin_case "home directory containing a space"
   home_dir="$(mktemp -d)/My Home"
