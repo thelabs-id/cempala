@@ -734,7 +734,7 @@ run_all_cases() {
   setup_world
   run_installer
   assert_eq "exit status" "$rc" "0"
-  assert_contains "says it removed the old one" "$out" "removed the PATH export"
+  assert_contains "says it replaced the old one" "$out" "replaced the PATH export"
   # shellcheck disable=SC2016
   assert_eq "the legacy export is gone" \
     "$(count_matches "$home_dir/.zshrc" 'export PATH="\$HOME/.cempala/bin:\$PATH"')" "0"
@@ -774,7 +774,93 @@ run_all_cases() {
   rm -rf "$(dirname "$home_dir")"
   teardown
 
-  # 19. A home directory with a space in it — the reason flags are passed as
+  # 19. The sweep. An older installer picked the first rc file that happened to
+  #     EXIST, so a bash user's block frequently landed in a stray ~/.zshrc.
+  #     Upgrading writes to the right files; without the sweep the old block
+  #     sits in the wrong one forever, pointing at an install that may have
+  #     moved since.
+  begin_case "stale block in a file we no longer write to — swept away"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# zsh config a bash user still has lying around"
+    echo ""
+    echo "# cempala installer — added by install.sh"
+    # shellcheck disable=SC2016
+    echo 'export PATH="$HOME/.cempala/bin:$PATH"'
+    echo "alias zz='echo hi'"
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/bash"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "says it swept" "$out" "removed a stale cempala PATH export"
+  assert_eq "the stale block is gone from .zshrc" \
+    "$(count_matches "$home_dir/.zshrc" 'cempala')" "0"
+  assert_contains "the rest of .zshrc survived" "$(cat "$home_dir/.zshrc")" "alias zz='echo hi'"
+  assert_contains "and the first line too" "$(cat "$home_dir/.zshrc")" "# zsh config a bash user"
+  assert_eq "bash's login file got the current block" \
+    "$(count_matches "$home_dir/.bash_profile" 'cempala installer')" "1"
+  assert_eq "so did .bashrc" \
+    "$(count_matches "$home_dir/.bashrc" 'cempala installer')" "1"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 20. The sweep must not touch a file that never had our block, and must not
+  #     fire twice — a second run has nothing left to sweep.
+  begin_case "sweep is idempotent and leaves unrelated files alone"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  echo "# nothing to do with cempala" > "$home_dir/.zshrc"
+  cp "$home_dir/.zshrc" "$(dirname "$home_dir")/zshrc-before"
+  shell_env="/bin/bash"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_not_contains "nothing was swept" "$out" "removed a stale cempala"
+  assert_same_file "unrelated file untouched" \
+    "$(dirname "$home_dir")/zshrc-before" "$home_dir/.zshrc"
+
+  cp "$home_dir/.bash_profile" "$(dirname "$home_dir")/bp-before"
+  run_installer
+  assert_eq "second run exit status" "$rc" "0"
+  assert_not_contains "still nothing to sweep" "$out" "removed a stale cempala"
+  assert_contains "recognised as current" "$out" "already present"
+  assert_same_file "target file byte-identical on re-run" \
+    "$(dirname "$home_dir")/bp-before" "$home_dir/.bash_profile"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 21. An orphaned current block — marker lost to a hand edit, or to the bug
+  #     an earlier version of this installer had — is recognised and replaced
+  #     rather than left to sit alongside a freshly appended copy.
+  begin_case "orphaned block with no marker — cleaned up, not duplicated"
+  home_dir="$(mktemp -d)/home"
+  mkdir -p "$home_dir"
+  {
+    echo "# user config"
+    # shellcheck disable=SC2016
+    echo 'case ":$PATH:" in'
+    # shellcheck disable=SC2016
+    echo '  *":$HOME/.cempala/bin:"*) ;;'
+    # shellcheck disable=SC2016
+    echo '  *) PATH="$HOME/.cempala/bin${PATH:+:$PATH}"; export PATH ;;'
+    echo 'esac'
+  } > "$home_dir/.zshrc"
+  shell_env="/bin/zsh"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  # shellcheck disable=SC2016  # literal regex, must not expand here
+  assert_eq "exactly one block" \
+    "$(count_matches "$home_dir/.zshrc" '^case ":\$PATH:" in')" "1"
+  assert_eq "and it has its marker" \
+    "$(count_matches "$home_dir/.zshrc" '^# cempala installer')" "1"
+  assert_contains "user config kept" "$(cat "$home_dir/.zshrc")" "# user config"
+  rm -rf "$(dirname "$home_dir")"
+  teardown
+
+  # 22. A home directory with a space in it — the reason flags are passed as
   #     real arguments instead of one word-split string.
   begin_case "home directory containing a space"
   home_dir="$(mktemp -d)/My Home"

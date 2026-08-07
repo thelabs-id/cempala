@@ -165,122 +165,130 @@ export PATH="${bin_dir}${PATH:+:${PATH}}"
 # installer reports success while cempala stays absent from PATH.
 shell_name=$(basename "${SHELL:-}")
 
-# The marker doubles as the idempotency check, so the snippet below can change
-# without a re-run duplicating what an older installer already wrote.
+# --- what this installer writes, and every form it has ever written ---------
+#
+# Removal is driven off these lists, and so is detection: "is a block already
+# here" is answered by running the removal and seeing whether it changed
+# anything, never by a separate grep. That is deliberate. Two rounds of bugs in
+# this file came from a detection rule drifting from the removal rule — a
+# substring check firing on a commented-out copy, a marker check that deleted
+# the marker of a block it should have kept. One rule cannot disagree with
+# itself.
 rc_marker='# cempala installer — added by install.sh'
 
-# What earlier versions of this installer wrote. Re-running has to replace it,
-# not step over it: the marker is the same, so a plain "already present" check
-# would leave every existing user on the old unguarded line forever, and no
-# later fix to the snippet would ever reach them.
-# shellcheck disable=SC2016  # a literal, matched byte-for-byte — never expanded
-rc_legacy='export PATH="$HOME/.cempala/bin:$PATH"'
-
-# strip_legacy <file> — remove what an earlier installer wrote, if present.
+# The block written today. Guarded, so being sourced twice — or from both of
+# bash's two startup files — cannot stack the directory onto PATH twice, and
+# ${PATH:+:$PATH} so an empty PATH does not gain a trailing colon (an empty
+# PATH component means the current directory).
 #
-# Exit status: 0 migrated, 1 nothing to migrate, 2 legacy present but the
-# migration could not be completed safely. The caller has to tell 2 from 1:
-# both leave the file unmodified, but only 2 means the user is still on the
-# old line and should hear about it.
-strip_legacy() {
-  local file="$1"
-  # -x, so detection uses the same whole-line equality the removal below does.
-  # A substring match would fire on a line that merely CONTAINS the old export
-  # — someone's commented-out `# export PATH="$HOME/.cempala/bin:$PATH"` — and
-  # then awk, matching whole lines, would find nothing to remove but the marker
-  # of the current block. That leaves the block orphaned and appends a fresh
-  # one, and it does it again on every re-run.
-  grep -qFx "$rc_legacy" "$file" || return 1
+# Single-quoted throughout: $HOME and $PATH must reach the file UNEXPANDED.
+# shellcheck disable=SC2016
+rc_body_current=(
+  'case ":$PATH:" in'
+  '  *":$HOME/.cempala/bin:"*) ;;'
+  '  *) PATH="$HOME/.cempala/bin${PATH:+:$PATH}"; export PATH ;;'
+  'esac'
+)
 
-  # Every failure branch below returns 1 and leaves the file untouched. This
-  # function runs inside an `if`, which disables `set -e` for everything it
-  # calls, so each step is checked by hand — an unnoticed failure here would
-  # mean rewriting a shell config from a half-built temp file.
-  local tmp
-  tmp=$(mktemp "${file}.cempala.XXXXXX") || return 2
+# What older versions wrote. Kept so an upgrade REPLACES it rather than leaving
+# the user on a snippet no later fix can reach.
+# shellcheck disable=SC2016
+rc_body_legacy=(
+  'export PATH="$HOME/.cempala/bin:$PATH"'
+)
 
-  # Remove the marker line only when it is the marker OF A LEGACY BLOCK — that
-  # is, when the very next line is the legacy export. Deleting every marker
-  # unconditionally is wrong for a file holding both an old block and a current
-  # one: the current block would lose its marker, be left orphaned in the file,
-  # and then a fresh copy would be appended below it.
-  #
-  # Whole-line equality throughout, never a substring or a pattern. The only
-  # lines that may be deleted are ones byte-identical to what this installer
-  # itself wrote; anything a human typed, even something that looks similar,
-  # stays.
-  #
-  # The count of what was dropped goes to a side file so the check below is
-  # measuring the same pass that produced the output, rather than a second
-  # implementation of the same rule that could drift from it.
-  local dropped="${tmp}.dropped"
-  if ! awk -v marker="$rc_marker" -v legacy="$rc_legacy" -v dropfile="$dropped" '
+# rc_filter <src> <dst> <dropfile> — copy src to dst without any cempala block.
+#
+# Removes, by exact whole-line equality only:
+#   - the marker followed by either known body,
+#   - either body standing alone, its marker lost to a hand edit or to the
+#     bug in an earlier version of this installer,
+#   - one blank line immediately above a removed block, so repeated upgrades
+#     do not accumulate blank lines.
+# A marker followed by something we do not recognise is LEFT ALONE — that is
+# someone's own edit, and guessing at it is how you destroy a shell config.
+#
+# Writes the number of dropped lines to <dropfile>. Returns non-zero if awk
+# failed or the line counts do not add up.
+rc_filter() {
+  local src="$1" dst="$2" dropfile="$3"
+  local cur leg before after dropped
+  cur=$(printf '%s\n' "${rc_body_current[@]}")
+  leg=$(printf '%s\n' "${rc_body_legacy[@]}")
+
+  # The bodies travel through the ENVIRONMENT, not `awk -v`. A -v assignment
+  # cannot carry a literal newline — BSD awk fails outright with "newline in
+  # string" — and it also processes backslash escapes, neither of which is what
+  # a multi-line block of shell code needs. Prefixed assignments like these
+  # apply to this one command and do not leak into the rest of the script.
+  CEMPALA_RC_MARKER="$rc_marker" CEMPALA_RC_CUR="$cur" CEMPALA_RC_LEG="$leg" \
+  awk -v dropfile="$dropfile" '
+    function matches(start, arr, n,   k) {
+      for (k = 1; k <= n; k++)
+        if (line[start + k - 1] != arr[k]) return 0
+      return 1
+    }
+    BEGIN {
+      marker = ENVIRON["CEMPALA_RC_MARKER"]
+      nc = split(ENVIRON["CEMPALA_RC_CUR"], C, "\n")
+      nl = split(ENVIRON["CEMPALA_RC_LEG"], L, "\n")
+    }
     { line[NR] = $0 }
     END {
-      n = 0
+      no = 0; n = 0
       for (i = 1; i <= NR; i++) {
-        if (line[i] == marker && line[i + 1] == legacy) { n += 2; i++; continue }
-        if (line[i] == legacy) { n++; continue }
-        print line[i]
+        drop = 0
+        if (line[i] == marker) {
+          if (matches(i + 1, C, nc))      drop = 1 + nc
+          else if (matches(i + 1, L, nl)) drop = 1 + nl
+        }
+        if (!drop && matches(i, C, nc)) drop = nc
+        if (!drop && matches(i, L, nl)) drop = nl
+        if (drop) {
+          if (no > 0 && out[no] == "") { no--; n++ }
+          n += drop
+          i += drop - 1
+          continue
+        }
+        out[++no] = line[i]
       }
+      for (k = 1; k <= no; k++) print out[k]
       print n > dropfile
     }
-  ' "$file" > "$tmp"; then
-    rm -f "$tmp" "$dropped"
-    return 2
-  fi
+  ' "$src" > "$dst" || return 1
 
-  # Verify that exactly the lines that pass reported went, and nothing else.
-  # Counting rather than assuming a fixed number matters: a file that
-  # accumulated the block twice — two upgrades through different installer
-  # versions — legitimately loses four lines, and a fixed "no more than three"
-  # guard would refuse to migrate it and silently leave BOTH old exports in
-  # place.
-  #
-  # awk does the counting on both sides, not `wc -l`, so a file whose last line
-  # has no trailing newline is counted the same way in both.
-  local before removed after
-  before=$(awk 'END { print NR + 0 }' "$file")
-  removed=$(cat "$dropped" 2>/dev/null || echo 0)
-  after=$(awk 'END { print NR + 0 }' "$tmp")
-  rm -f "$dropped"
-  if [ "$removed" -eq 0 ] || [ "$after" -ne "$(( before - removed ))" ]; then
-    rm -f "$tmp"
-    return 2
-  fi
-
-  # Copy the contents back rather than renaming over the original. An rc file
-  # is very often a symlink into a dotfiles repo, and a rename would silently
-  # replace that link with a regular file — detaching it from the repo the
-  # user manages it in. Writing through the link updates the tracked file,
-  # which is what someone with that setup expects.
-  #
-  # The backup exists for the window between truncating $file and finishing
-  # the write. It is a few bytes and one syscall against the possibility of
-  # leaving a user with no working shell config at all.
-  #
-  # It comes from mktemp rather than a fixed "$file.cempala-backup" name. A
-  # predictable name is one the user might already have — and we would then
-  # overwrite their file and delete it on the way out. Worse, if that name
-  # happened to be a symlink, the write would land on whatever it pointed at.
-  # mktemp creates a fresh regular file that is unambiguously ours to remove.
-  local backup
-  backup=$(mktemp "${file}.cempala-bak.XXXXXX") || { rm -f "$tmp"; return 2; }
-  if ! cp "$file" "$backup"; then
-    rm -f "$tmp" "$backup"
-    return 2
-  fi
-  if ! cat "$tmp" > "$file"; then
-    cat "$backup" > "$file" || true
-    rm -f "$tmp" "$backup"
-    return 2
-  fi
-  rm -f "$tmp" "$backup"
-  return 0
+  before=$(awk 'END { print NR + 0 }' "$src")
+  after=$(awk 'END { print NR + 0 }' "$dst")
+  dropped=$(cat "$dropfile" 2>/dev/null || echo 0)
+  # The count comes from the same pass that produced the output, so this is a
+  # check on the write actually landing, not a second opinion about the rule.
+  [ "$after" -eq "$(( before - dropped ))" ] || return 1
 }
 
-# append_rc <file> — add the PATH snippet unless this installer already did.
-append_rc() {
+# rc_write_back <file> <new-contents> — replace file's contents in place.
+#
+# Copies rather than renames: an rc file is very often a symlink into a
+# dotfiles repo, and a rename would silently replace that link with a regular
+# file, detaching it from the repo the user manages it in. The backup covers
+# the window between truncating and finishing the write, and comes from mktemp
+# because a predictable name is one the user might already be using.
+rc_write_back() {
+  local file="$1" new="$2" backup
+  backup=$(mktemp "${file}.cempala-bak.XXXXXX") || return 1
+  if ! cp "$file" "$backup"; then
+    rm -f "$backup"
+    return 1
+  fi
+  if ! cat "$new" > "$file"; then
+    cat "$backup" > "$file" || true
+    rm -f "$backup"
+    return 1
+  fi
+  rm -f "$backup"
+}
+
+# ensure_rc <file> — leave <file> holding exactly the current block.
+ensure_rc() {
   local file="$1"
   local created=""
   if [ ! -f "$file" ]; then
@@ -288,65 +296,85 @@ append_rc() {
     created=1
   fi
 
-  local migrated="" migrate_rc=0
-  strip_legacy "$file" || migrate_rc=$?
-  if [ "$migrate_rc" -eq 0 ]; then
-    migrated=1
-  elif [ "$migrate_rc" -eq 2 ]; then
-    # The old line is still there and still works — it only misbehaves when
-    # PATH is empty. Appending a second block on top of it would be worse than
-    # saying so and leaving it alone.
-    echo "  ! could not rewrite the PATH export in $file; left it untouched"
-    echo "    (it still works; re-run this installer once the file is writable)"
-    return 0
-  fi
+  local tmp dropfile
+  tmp=$(mktemp "${file}.cempala.XXXXXX") || { rc_warn "$file"; return 0; }
+  dropfile="${tmp}.dropped"
 
-  # Ask whether a current block is present AFTER the migration, not instead of
-  # it. A file can hold both an old block and a current one — run an old
-  # installer, then a new one, then an old one again — and there the migration
-  # removes the legacy pair while a perfectly good current block survives.
-  # Treating "we migrated something" as "so there is nothing here now" would
-  # append a second copy alongside it.
-  #
-  # -x for the same reason strip_legacy uses it: a substring match would treat
-  # a line that merely mentions the marker — someone's own note, or a
-  # commented-out "# # cempala installer …" — as proof the block is present,
-  # and the PATH export would then never be written at all.
-  if grep -qFx "$rc_marker" "$file"; then
-    if [ -n "$migrated" ]; then
-      echo "→ removed the PATH export an earlier installer left in $file"
-      echo "  (a current one was already there)"
-    else
-      echo "→ PATH export already present in $file"
-    fi
+  if ! rc_filter "$file" "$tmp" "$dropfile"; then
+    rm -f "$tmp" "$dropfile"
+    rc_warn "$file"
     return 0
   fi
-  # Single quotes are the point, not an oversight: $HOME and $PATH have to
-  # reach the file UNEXPANDED, so the line survives the account being moved
-  # and doesn't freeze today's PATH into every future shell.
-  #
-  # The guard around the prepend matters because bash gets two files below and
-  # a ~/.bash_profile that sources ~/.bashrc — a very common arrangement —
-  # would otherwise stack the same directory onto PATH twice per login.
-  #
-  # ${PATH:+:$PATH} for the same reason as above: an empty PATH would leave a
-  # trailing colon, and an empty PATH component means the current directory.
-  # shellcheck disable=SC2016
+  local dropped
+  dropped=$(cat "$dropfile" 2>/dev/null || echo 0)
+  rm -f "$dropfile"
+
   {
     echo ""
     echo "$rc_marker"
-    echo 'case ":$PATH:" in'
-    echo '  *":$HOME/.cempala/bin:"*) ;;'
-    echo '  *) PATH="$HOME/.cempala/bin${PATH:+:$PATH}"; export PATH ;;'
-    echo 'esac'
-  } >> "$file"
+    printf '%s\n' "${rc_body_current[@]}"
+  } >> "$tmp"
+
+  # Strip-then-append and compare, rather than asking up front whether a block
+  # is present. A file already holding the current block rebuilds to something
+  # byte-identical, so it is left completely untouched — and there is no
+  # separate "is it there?" rule that could disagree with the removal.
+  if cmp -s "$file" "$tmp"; then
+    echo "→ PATH export already present in $file"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if ! rc_write_back "$file" "$tmp"; then
+    rm -f "$tmp"
+    rc_warn "$file"
+    return 0
+  fi
+  rm -f "$tmp"
+
   if [ -n "$created" ]; then
     echo "→ created $file with the PATH export"
-  elif [ -n "$migrated" ]; then
+  elif [ "$dropped" -gt 0 ]; then
     echo "→ replaced the PATH export an earlier installer left in $file"
   else
     echo "→ appended PATH export to $file"
   fi
+}
+
+rc_warn() {
+  echo "  ! could not update the PATH export in $1; left it untouched"
+  echo "    (re-run this installer once that file is writable)"
+}
+
+# purge_rc <file> — remove any cempala block from a file we no longer write to.
+#
+# Older versions picked the first rc file that happened to EXIST, which for a
+# bash user was frequently a stray ~/.zshrc their shell never reads. Upgrading
+# writes to the right files, but without this the old block sits there forever,
+# pointing at an install that may since have moved.
+purge_rc() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+
+  local tmp dropfile dropped
+  tmp=$(mktemp "${file}.cempala.XXXXXX") || return 0
+  dropfile="${tmp}.dropped"
+  if ! rc_filter "$file" "$tmp" "$dropfile"; then
+    rm -f "$tmp" "$dropfile"
+    return 0
+  fi
+  dropped=$(cat "$dropfile" 2>/dev/null || echo 0)
+  rm -f "$dropfile"
+
+  if [ "$dropped" -eq 0 ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if rc_write_back "$file" "$tmp"; then
+    echo "→ removed a stale cempala PATH export from $file"
+    echo "  (your shell does not read it; the current one is above)"
+  fi
+  rm -f "$tmp"
 }
 
 case "$shell_name" in
@@ -381,7 +409,28 @@ case "$shell_name" in
 esac
 
 for rc_file in "${rc_targets[@]}"; do
-  append_rc "$rc_file"
+  ensure_rc "$rc_file"
+done
+
+# Then sweep every other startup file this installer might once have written
+# to. An older version picked the first rc file that happened to EXIST, so an
+# upgrade can leave a block behind in a file we no longer write to — pointing
+# at an install that may since have moved. Removing it is the whole point of
+# re-running an installer: one current copy, in the right place, and nothing
+# stale left over.
+for candidate in \
+  "${HOME}/.zshrc" "${HOME}/.zprofile" \
+  "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.bash_login" \
+  "${HOME}/.profile"
+do
+  is_target=""
+  for rc_file in "${rc_targets[@]}"; do
+    if [ "$candidate" = "$rc_file" ]; then
+      is_target=1
+      break
+    fi
+  done
+  [ -n "$is_target" ] || purge_rc "$candidate"
 done
 
 case "$shell_name" in
