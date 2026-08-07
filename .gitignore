@@ -27,8 +27,8 @@ test-paths*.ts
 test-spawn*.ts
 test-mcp.ts
 
-# Cempala local state (intentionally — see AGENTS.md §10: deleting ~/.cempala
-# fully resets the system; this also covers the per-repo test working dir)
+# Cempala local state (intentionally: deleting ~/.cempala fully resets the
+# system; this also covers the per-repo test working dir)
 .cempala/
 
 # Project docs — kept on disk but not tracked in git. The source of

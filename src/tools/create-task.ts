@@ -3,7 +3,7 @@
 // FR-3: create a task row immediately, then validate `cwd` against the
 // trust boundary (FR-10–FR-11c).
 //
-// Outcomes (REQUIREMENTS.md §6):
+// Outcomes:
 //   - denylist hit    → status = rejected, ok: false, code "denied"
 //   - outside home and not approved → status = needs_approval, ok: true
 //   - inside home or inside approved root → status = pending, ok: true

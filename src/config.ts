@@ -3,7 +3,7 @@
 // Loads ~/.cempala/config.toml. Per-OS path resolution: config values may
 // use `~/` as a portable placeholder; we expand against os.homedir() on
 // read, so the running server always has absolute paths in hand (the one
-// place a literal `~` is legitimate — see AGENTS.md §6).
+// place a literal `~` is legitimate).
 //
 // Behavior on missing config: returns defaults, never throws. `cempala --init`
 // is what creates the on-disk file the first time; before that, everything
@@ -83,7 +83,7 @@ const DEFAULTS: AppConfig = {
 /**
  * Load config from disk if present, otherwise return defaults.
  * `~/` in values is expanded against os.homedir() here — the only place
- * raw `~` is ever allowed (REQUIREMENTS.md §9 / AGENTS.md §6).
+ * raw `~` is ever allowed.
  */
 export function loadConfig(path: string = DEFAULT_CONFIG_PATH): AppConfig {
   if (!existsSync(path)) return { ...DEFAULTS, source: "<defaults>" };

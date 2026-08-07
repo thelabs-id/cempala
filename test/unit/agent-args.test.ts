@@ -75,7 +75,7 @@ describe("resolveClaudeArgv (AC-13)", () => {
     expect(allToolsValues).toContain("WebSearch");
     // CRITICAL: --disallowedTools must NOT be present when allow_network=true
     // (those tools are in --tools, so denying them at the same time is
-    // self-contradictory — AGENTS.md §5)
+    // self-contradictory)
     expect(r.argv).not.toContain("--disallowedTools");
   });
 

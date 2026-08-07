@@ -2,8 +2,7 @@
 //
 // The ONLY path comparator. Every path comparison in the codebase — trust
 // boundary, denylist, approved-root lookup — goes through this file.
-// Per REQUIREMENTS.md §5 and AGENTS.md §5 ("One canonicalization routine,
-// in security/paths.ts, used by everything").
+// One canonicalization routine, in security/paths.ts, used by everything.
 //
 // Two things go wrong the moment someone hand-rolls a second comparison:
 //   1. A bare startsWith matches `D:\clients\acme2` against `D:\clients\acme`.
@@ -16,7 +15,7 @@ import { platform } from "node:process";
 import { ensureAbsolute, expandHome } from "../platform/paths.ts";
 
 /**
- * Canonical form of a path (REQUIREMENTS.md §5):
+ * Canonical form of a path:
  *   1. expand leading `~` against os.homedir() (so `~/.ssh` and
  *      `$HOME/.ssh` compare equal — without this, a caller passing the
  *      documented AC-3 example `cwd: "~/.ssh"` ends up at

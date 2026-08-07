@@ -1,9 +1,8 @@
 // src/security/denylist.ts
 //
 // Two distinct denylists, both extending compile-time baselines that cannot
-// be weakened by config edits (REQUIREMENTS.md §7 "Config denylists are
-// additive, never authoritative"; AGENTS.md §10 "Don't shrink the baseline
-// denylist").
+// be weakened by config edits: config denylists are additive, never
+// authoritative, and the baseline cannot be shrunk.
 //
 //   1. Path denylist (FR-11a): roots that are *always* blocked, even
 //      though they sit under the home directory. Matching is by containment

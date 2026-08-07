@@ -2,9 +2,9 @@
 //
 // The ONLY place that decides `allowed` vs `needs_approval` vs `denied` for
 // a `cwd`. Tool handlers consume its verdict; they never re-derive it.
-// (AGENTS.md §5, FR-10–FR-11c.)
+// (FR-10–FR-11c.)
 //
-// Order of evaluation (REQUIREMENTS.md §5):
+// Order of evaluation:
 //   1. Denylist hit → denied (wins over everything, including an approved root).
 //      Resolving symlinks before matching is what stops a symlink inside an
 //      approved directory from pointing at ~/.ssh and escaping the check.

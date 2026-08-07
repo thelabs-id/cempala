@@ -3,7 +3,7 @@
 // FR-5: complete a task. `status` ∈ {completed, failed}. Sets result,
 // completed_at.
 //
-// `result` is REQUIRED per the spec (REQUIREMENTS.md §6 FR-5: "Sets result,
+// `result` is REQUIRED per the spec (FR-5: "Sets result,
 // completed_at"). A null/empty result is a real audit-trail gap — the
 // caller knows what happened, and "I don't know" is itself information
 // the row must record. We reject missing/empty results at the boundary

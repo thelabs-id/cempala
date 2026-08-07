@@ -1,6 +1,6 @@
 // test/integration/_helpers.ts
 //
-// Gated behind CEMPALA_INTEGRATION=1 (REQUIREMENTS.md §12 / AGENTS.md §9).
+// Gated behind CEMPALA_INTEGRATION=1.
 // These tests actually spawn `codex` and `claude` and need both CLIs on
 // PATH. They are skipped by `bun test` (the unit test runner); the
 // `npm run test:integration` script opts in.

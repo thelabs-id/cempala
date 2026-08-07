@@ -3,7 +3,7 @@
 # Per FR-18..FR-22. Non-interactive, idempotent, designed to be piped from
 # `irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.ps1 | iex`.
 #
-# Steps (per AGENTS.md section 8):
+# Steps:
 #   1. $env:PROCESSOR_ARCHITECTURE -> maps to cempala-windows-{x64,arm64}.exe.
 #   2. Invoke-WebRequest to download, Get-FileHash to verify checksum.
 #   3. Install to %USERPROFILE%\.cempala\bin -- NOT AppData, see step 3 below.
@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 # --- 1. Detect architecture ---
 #
 # ARM64 deliberately maps to the x64 asset. A native windows-arm64 binary
-# builds fine, but per AGENTS.md section 7 a target is not a release artifact
+# builds fine, but a target is not a release artifact
 # until it has been smoke-tested on matching hardware, and that has not
 # happened yet -- so it is not published. Windows on ARM runs x64 binaries
 # under emulation, so pointing ARM64 machines at the verified x64 build gives

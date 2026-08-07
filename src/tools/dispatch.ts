@@ -2,7 +2,7 @@
 //
 // FR-6: the synchronous "do this now and tell me the result" path.
 //
-// Flow (REQUIREMENTS.md §6):
+// Flow:
 //   1. Insert a `tasks` row immediately (`via = "dispatch"`), then
 //      validate `cwd` against the trust boundary and `prompt`/expected
 //      command against the denylist:
@@ -15,7 +15,7 @@
 //        - otherwise → set `status = running`, continue to step 2.
 //   2. Spawn the target CLI **detached**, stdout+stderr redirected to
 //      `output_file`. Set the child's cwd via Bun.spawn({ cwd }) (not via
-//      a CLI flag — see AGENTS.md §6 for why there's one mechanism).
+//      a CLI flag — there is deliberately one mechanism).
 //   3. Wait up to `wait_seconds` (default 120, hard ceiling 600) for the
 //      process to exit.
 //        - exits in time → parse, set status, return result.
@@ -99,7 +99,7 @@ export async function dispatch(
   // created_by tracks the caller's identity for the audit row (G2) and
   // for the FK. We don't accept a hard-coded fallback to "claude" —
   // the reverse handoff path (Codex → Claude) is a documented v1
-  // scenario (REQUIREMENTS.md §1: "From Codex: Have Claude refactor
+  // scenario ("From Codex: Have Claude refactor
   // this file."), and silently misattributing those rows to Claude
   // would break the ownership trail. If the caller doesn't supply
   // created_by, we leave it null in the row and skip the FK seed.

@@ -182,7 +182,7 @@ describe("security/denylist.ts — matchPathDenylist (AC-3, AC-10)", () => {
         symlinkSync(secrets, link, "dir");
       } catch (e) {
         // Windows without Developer Mode / elevation. Skip loudly rather than
-        // passing silently, per AGENTS.md §9.
+        // passing silently.
         console.warn("SKIP AC-12 (hermetic): cannot create symlink:", (e as Error).message);
         return;
       }

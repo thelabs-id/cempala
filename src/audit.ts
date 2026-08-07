@@ -6,7 +6,7 @@
 // that ran during its wait, breaking any time-based audit query).
 // The duration_ms is computed at completion; the timestamp is the
 // call start. The audit table is never pruned automatically
-// (REQUIREMENTS.md §6 / FR-8).
+// (FR-8).
 
 import type { DB } from "./db/client.ts";
 

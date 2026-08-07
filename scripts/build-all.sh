@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # scripts/build-all.sh — cross-compile all six release targets.
 #
-# Per AGENTS.md §7. Each target needs a real smoke test on matching
-# hardware (native machine or VM) before being tagged as a release
-# artifact — a successful build proves nothing about the artifact
-# because the binary can't be run on the build host if the target
-# arch differs.
+# Each target needs a real smoke test on matching hardware (native machine
+# or VM) before being tagged as a release artifact — a successful build
+# proves nothing about the artifact, because the binary can't be run on the
+# build host if the target arch differs.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

@@ -4,7 +4,7 @@
 // 30 minutes with a dead PID and marks it `failed` with
 // result = "process exited without a recorded result — check output_file".
 //
-// Implementation note (REQUIREMENTS.md §8): the reaper is piggybacked on
+// Implementation note: the reaper is piggybacked on
 // tool calls rather than timer-driven. Each tool call invokes `maybeSweep()`
 // before returning. That bounds the guarantee: a stale row is cleared on
 // the next tool call after it goes stale, not at the 30-minute mark itself.

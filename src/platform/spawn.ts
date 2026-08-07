@@ -5,7 +5,7 @@
 // should reach into `process.platform` directly. The two responsibilities
 // are intentionally fused in one file because they share the same OS-level
 // primitives (the child's pid is what liveness has to be re-derivable from
-// after a server restart — see AGENTS.md §6 "Liveness must be restart-safe").
+// after a server restart: liveness has to be restart-safe).
 
 import { spawn, type Subprocess } from "bun";
 import { realpathSync, existsSync, openSync, closeSync, mkdirSync } from "node:fs";
