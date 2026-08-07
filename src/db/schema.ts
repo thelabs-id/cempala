@@ -1,14 +1,13 @@
 // src/db/schema.ts
 //
-// Raw SQL schema + migrations (no ORM — AGENTS.md §5). Five tables, see
-// REQUIREMENTS.md §5 for column-level documentation. Idempotent: every
-// CREATE uses IF NOT EXISTS so migrations can be re-run.
+// Raw SQL schema + migrations (no ORM). Five tables, documented column by
+// column inline below. Idempotent: every CREATE uses IF NOT EXISTS so
+// migrations can be re-run.
 
 export const SCHEMA_SQL = `
--- Five tables per REQUIREMENTS.md §5: agents, messages, tasks,
--- approved_paths, audit_log. (schema_version was a 6th metadata table in
--- a previous iteration; it was unused and has been removed to keep the
--- table count honest with the spec.)
+-- Five tables: agents, messages, tasks, approved_paths, audit_log.
+-- (schema_version was a 6th metadata table in a previous iteration; it was
+-- unused and has been removed to keep the table count honest with the spec.)
 --
 -- The DROP TABLE below is a no-op on fresh databases and a one-time
 -- cleanup on databases created by older builds that had the metadata

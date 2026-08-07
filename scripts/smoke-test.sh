@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/smoke-test.sh — prove a built binary actually works on this machine.
 #
-# Per AGENTS.md §7, a cross-compiled binary can't be run on the build host, so
-# a successful build says nothing about the artifact. This is the check that
+# A cross-compiled binary can't be run on the build host, so a successful
+# build says nothing about the artifact. This is the check that
 # has to happen on matching hardware before a target is published — and it is
 # a script rather than prose in a workflow file so that a human testing by
 # hand and CI run exactly the same thing.

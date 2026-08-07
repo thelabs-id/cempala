@@ -4,7 +4,7 @@
 # Per FR-18..FR-22. Non-interactive, idempotent, designed to be piped from
 # `curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.sh | bash`.
 #
-# Steps (per AGENTS.md §8):
+# Steps:
 #   1. uname -s / uname -m → map to one of the four Unix release assets.
 #   2. Download via curl, verify against the published SHA-256 checksum.
 #   3. mkdir -p ~/.cempala/bin, stage the binary there and rename it into

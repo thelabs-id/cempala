@@ -6,7 +6,7 @@
 // AC-13) reads the resolved argv and the resolved network_enforcement
 // label from here.
 //
-// Critical rules from AGENTS.md §5:
+// Critical rules:
 //   - `--tools` defines which built-in tools exist for the session.
 //     `--allowedTools` only pre-approves tools that would otherwise prompt,
 //     and cannot take a tool away. Therefore the FR-14 restriction is
@@ -27,7 +27,7 @@
 
 import type { AppConfig, AgentConfig } from "../config.ts";
 
-/** Network enforcement label (FR-13). Three states — see AGENTS.md §5. */
+/** Network enforcement label (FR-13). Three states. */
 export type NetworkEnforcement = "sandboxed" | "tools_only" | "allowed";
 
 /**
@@ -132,8 +132,7 @@ export interface ResolvedArgv {
  *   allow_network=false → --sandbox workspace-write          (FR-14 baseline)
  *   allow_network=true  → --sandbox workspace-write -c sandbox_workspace_write.network_access=true
  *
- * `allowed_tools` is a no-op for codex (per AGENTS.md §6 / the
- * REQUIREMENTS.md §6 spec for dispatch).
+ * `allowed_tools` is a no-op for codex (per the dispatch spec).
  *
  * Implementation note: codex refuses to run outside a git repository
  * unless --skip-git-repo-check is supplied. We always add the flag —
@@ -246,7 +245,7 @@ export function resolveClaudeArgv(
   // 4. Output format: keep JSON for the wrapper to parse.
   argv.push("--output-format", "json");
 
-  // 5. Belt-and-braces (AGENTS.md §5): when network is off, deny web
+  // 5. Belt-and-braces: when network is off, deny web
   //    tools explicitly. They are already absent from --tools in this
   //    case, so this is redundant for our baseline; but if the user has
   //    overridden the baseline elsewhere, the second line keeps the

@@ -2,7 +2,7 @@
 //
 // FR-20: cempala --init writes a default config if absent; never overwrites
 // an existing one. Also verifies ~ expansion and that the default config
-// has the right shape (no `home_root` baked in — per AGENTS.md §6 / §8).
+// has the right shape (no `home_root` baked in).
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";

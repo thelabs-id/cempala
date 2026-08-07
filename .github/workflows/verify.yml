@@ -8,12 +8,12 @@ name: verify
 #      Windows by design, so until this workflow existed it had never actually
 #      executed anywhere.
 #
-#   2. Smoke-test the release binaries on matching hardware. AGENTS.md §7 is
-#      explicit that a cross-compiled binary proves nothing until it has been
-#      run on the platform it targets, which is what blocks publishing the
-#      macOS and Linux artifacts. The binaries are built ONCE and then shipped
-#      to each runner, so what gets tested is the exact artifact that would be
-#      released — not a fresh per-platform build that happens to work.
+#   2. Smoke-test the release binaries on matching hardware. A cross-compiled
+#      binary proves nothing until it has been run on the platform it targets,
+#      which is what blocks publishing the macOS and Linux artifacts. The
+#      binaries are built ONCE and then shipped to each runner, so what gets
+#      tested is the exact artifact that would be released — not a fresh
+#      per-platform build that happens to work.
 
 on:
   push:
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 env:
-  # Track the floor in AGENTS.md §2. Pinned rather than `latest` so a release
+  # Track the supported Bun floor. Pinned rather than `latest` so a release
   # artifact is reproducible and a Bun upgrade can't silently change it.
   BUN_VERSION: "1.3.14"
 

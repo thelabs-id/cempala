@@ -226,8 +226,6 @@ It drives the real `install.sh` against a stubbed `curl` and stub agent CLIs in 
 - `src/reaper.ts`: FR-17, the stale running-task sweep, piggybacked on every tool call.
 - `src/audit.ts`: FR-8, the append-only `audit_log` writer.
 
-See `REQUIREMENTS.md` for the full FR/NFR/AC spec, and `AGENTS.md` / `CLAUDE.md` for the build conventions and cross-platform rules.
-
 ## The name
 
 In Indonesian *wayang* theatre, the **cempala** is the small wooden mallet the puppeteer taps to cue the musicians and signal a change of scene. Here it plays the same role: a quiet cue that gets one agent to act on another's behalf.

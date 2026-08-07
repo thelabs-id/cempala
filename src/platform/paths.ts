@@ -2,7 +2,7 @@
 //
 // Single source of truth for cempala's per-OS filesystem locations.
 //
-// Three rules from AGENTS.md §6:
+// Three rules:
 //   1. Always os.homedir() + path.join — never a literal `~/` in code.
 //   2. Config/db/output dirs are resolved here, imported everywhere else —
 //      re-deriving `~/.cempala` in more than one place is the bug.

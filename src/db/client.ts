@@ -3,7 +3,7 @@
 // Single shared bun:sqlite connection. SQLite's file-locking is the entire
 // concurrency model for the multi-writer case (two MCP client processes
 // spawning one server each) — bun:sqlite's default journal mode handles it
-// at this scale (REQUIREMENTS.md §4).
+// at this scale.
 //
 // We expose a tiny typed wrapper that pre-prepares every statement once and
 // hands back a query function per query. No ORM, no query builder — that
