@@ -7,10 +7,11 @@
 # Steps (per AGENTS.md §8):
 #   1. uname -s / uname -m → map to one of the four Unix release assets.
 #   2. Download via curl, verify against the published SHA-256 checksum.
-#   3. mkdir -p ~/.cempala/bin, move the binary there, chmod +x.
-#   4. export PATH in this shell AND append to whichever rc file exists
-#      (zshrc, bashrc, profile — in that order, first match wins) so
-#      future shells pick it up.
+#   3. mkdir -p ~/.cempala/bin, stage the binary there and rename it into
+#      place, chmod +x.
+#   4. export PATH in this shell AND write it to the startup file(s) the
+#      user's shell actually reads — which for bash is two files, see §4 —
+#      so future shells pick it up.
 #   5. Run `cempala --init` to write the default config if absent.
 #   6. Detect claude / codex on PATH, run matching mcp add for each found;
 #      print the manual command for each not found.
@@ -47,7 +48,12 @@ else
 fi
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
+staged=""
+cleanup() {
+  rm -rf "$tmpdir"
+  if [ -n "$staged" ]; then rm -f "$staged"; fi
+}
+trap cleanup EXIT
 
 echo "→ downloading ${asset} (${CEMPALA_VERSION})"
 curl -fsSL "${release_url}/${asset}" -o "${tmpdir}/${asset}"
@@ -55,7 +61,18 @@ curl -fsSL "${release_url}/checksums.txt" -o "${tmpdir}/checksums.txt"
 
 # Verify the binary against checksums.txt BEFORE doing anything with it.
 echo "→ verifying sha-256"
-expected=$(grep -E "  ${asset}\$" "${tmpdir}/checksums.txt" | awk '{print $1}')
+#
+# `|| true` is load-bearing. Under `set -e` with `pipefail`, a grep that
+# matches nothing fails the pipeline, which fails the assignment, which exits
+# the script on the spot — so the explanatory message below could never print
+# and a release cut without a checksum line looked like a silent crash.
+#
+# The pattern allows the optional `*` binary-mode marker that some sha-256
+# tools emit, and accepts either hex case. Both details exist to match
+# install.ps1, whose -match and -ne are case-insensitive: a checksums.txt with
+# uppercase digests must not be readable by one installer and rejected by the
+# other.
+expected=$(grep -Ei "^[a-f0-9]+[[:space:]]+\*?${asset}\$" "${tmpdir}/checksums.txt" | awk '{print $1}') || true
 if [ -z "$expected" ]; then
   echo "error: no checksum found for ${asset} in checksums.txt" >&2
   exit 1
@@ -78,6 +95,10 @@ sha256_of() {
 }
 
 actual=$(sha256_of "${tmpdir}/${asset}")
+# Compare case-insensitively for the same reason the grep above is: the digest
+# in checksums.txt may legitimately be uppercase.
+expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
 if [ "$expected" != "$actual" ]; then
   echo "error: sha-256 mismatch for ${asset}" >&2
   echo "  expected: $expected" >&2
@@ -89,36 +110,221 @@ echo "  ✓ checksum verified"
 # --- 3. Install to ~/.cempala/bin ---
 bin_dir="${HOME}/.cempala/bin"
 mkdir -p "$bin_dir"
-mv "${tmpdir}/${asset}" "${bin_dir}/cempala"
-chmod +x "${bin_dir}/cempala"
+
+# Stage inside the destination directory, then rename into place. Two distinct
+# reasons this is not a plain `mv` from the temp dir:
+#
+#   - `mktemp -d` regularly lands on a different filesystem than $HOME (a tmpfs
+#     /tmp is the norm on Linux), and a cross-device mv is really a copy — it
+#     opens the destination for writing, which fails with ETXTBSY when the
+#     destination is an executable someone is running.
+#   - The destination usually IS running. Upgrading while an agent holds
+#     cempala open as an MCP server is the ordinary case, not the exception,
+#     and FR-22 says re-running the installer has to be safe.
+#
+# A rename within one directory is atomic and merely unlinks the old inode:
+# the running server keeps using the file it already opened until it exits,
+# and every new launch gets the new binary. Nobody's session has to be killed
+# to upgrade. This is the Unix counterpart of the rename-aside dance
+# install.ps1 does for Windows' file locks.
+#
+# Sweep anything a previous run left behind after being killed between the
+# copy and the rename — the EXIT trap covers every ordinary failure, but not
+# SIGKILL or a closed terminal. Only files older than an hour are touched: a
+# blanket `rm .cempala.new.*` would delete the staging file of a second
+# installer running right now and break it at chmod or mv.
+find "$bin_dir" -maxdepth 1 -name '.cempala.new.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
+
+# `mktemp` rather than a $$-derived name: it creates the file atomically and
+# cannot collide, whereas PIDs do repeat across containers sharing a home
+# directory — which would let two runs stage on top of each other, and let one
+# run's EXIT trap delete the other's staged binary.
+staged=$(mktemp "${bin_dir}/.cempala.new.XXXXXX")
+cp "${tmpdir}/${asset}" "$staged"
+chmod +x "$staged"
+mv -f "$staged" "${bin_dir}/cempala"
+staged=""
 echo "→ installed to ${bin_dir}/cempala"
 
 # --- 4. PATH for this shell AND future shells ---
-export PATH="${bin_dir}:${PATH}"
+#
+# ${PATH:+:${PATH}} rather than a plain "${bin_dir}:${PATH}": if PATH is empty,
+# the latter leaves a trailing colon, and an empty component in PATH means the
+# CURRENT DIRECTORY. Silently putting `.` on PATH is not a formatting nit —
+# it means a stray executable in whatever directory you happen to be standing
+# in can shadow a real command.
+export PATH="${bin_dir}${PATH:+:${PATH}}"
 
-# Pick the first rc file that already exists; don't create one.
-rc_file=""
-for candidate in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.profile"; do
-  if [ -f "$candidate" ]; then
-    rc_file="$candidate"
-    break
+# Write to the file(s) the shell the user actually runs will actually read.
+#
+# "First of zshrc/bashrc/profile that exists" is wrong twice over. It lands the
+# export in a stray ~/.zshrc some other tool left behind, which a bash user's
+# shell never sources; and for bash it picks the wrong file even when the shell
+# is right, because bash reads a DIFFERENT startup file depending on how it was
+# started, and which way that goes depends on the platform. Either way the
+# installer reports success while cempala stays absent from PATH.
+shell_name=$(basename "${SHELL:-}")
+
+# The marker doubles as the idempotency check, so the snippet below can change
+# without a re-run duplicating what an older installer already wrote.
+rc_marker='# cempala installer — added by install.sh'
+
+# What earlier versions of this installer wrote. Re-running has to replace it,
+# not step over it: the marker is the same, so a plain "already present" check
+# would leave every existing user on the old unguarded line forever, and no
+# later fix to the snippet would ever reach them.
+# shellcheck disable=SC2016  # a literal, matched byte-for-byte — never expanded
+rc_legacy='export PATH="$HOME/.cempala/bin:$PATH"'
+
+# strip_legacy <file> — remove what an earlier installer wrote, if present.
+strip_legacy() {
+  local file="$1"
+  grep -qF "$rc_legacy" "$file" || return 1
+
+  # Every failure branch below returns 1 and leaves the file untouched. This
+  # function runs inside an `if`, which disables `set -e` for everything it
+  # calls, so each step is checked by hand — an unnoticed failure here would
+  # mean rewriting a shell config from a half-built temp file.
+  local tmp
+  tmp=$(mktemp "${file}.cempala.XXXXXX") || return 1
+
+  # Exact whole-line equality, never a substring or pattern: the only lines
+  # that may be deleted are ones byte-identical to what this installer itself
+  # wrote. Anything a human typed — even something that merely looks similar —
+  # is left alone.
+  if ! awk -v marker="$rc_marker" -v legacy="$rc_legacy" '
+    $0 == marker { next }
+    $0 == legacy { next }
+    { print }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
   fi
+
+  # Refuse to proceed if that removed more than the three lines it should
+  # have. Leaving a stale export in place is a far better outcome than
+  # truncating someone's shell config, so when the result looks wrong, the
+  # cautious branch is to do nothing at all.
+  local before after
+  before=$(wc -l < "$file")
+  after=$(wc -l < "$tmp")
+  if [ "$after" -lt "$(( before - 3 ))" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  # Copy the contents back rather than renaming over the original. An rc file
+  # is very often a symlink into a dotfiles repo, and a rename would silently
+  # replace that link with a regular file — detaching it from the repo the
+  # user manages it in. Writing through the link updates the tracked file,
+  # which is what someone with that setup expects.
+  #
+  # The backup exists for the window between truncating $file and finishing
+  # the write. It is a few bytes and one syscall against the possibility of
+  # leaving a user with no working shell config at all.
+  local backup="${file}.cempala-backup"
+  if ! cp "$file" "$backup"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! cat "$tmp" > "$file"; then
+    cat "$backup" > "$file" || true
+    rm -f "$tmp" "$backup"
+    return 1
+  fi
+  rm -f "$tmp" "$backup"
+  return 0
+}
+
+# append_rc <file> — add the PATH snippet unless this installer already did.
+append_rc() {
+  local file="$1"
+  local created=""
+  if [ ! -f "$file" ]; then
+    : > "$file"
+    created=1
+  fi
+
+  local migrated=""
+  if strip_legacy "$file"; then
+    migrated=1
+  fi
+
+  if [ -z "$migrated" ] && grep -qF "$rc_marker" "$file"; then
+    echo "→ PATH export already present in $file"
+    return 0
+  fi
+  # Single quotes are the point, not an oversight: $HOME and $PATH have to
+  # reach the file UNEXPANDED, so the line survives the account being moved
+  # and doesn't freeze today's PATH into every future shell.
+  #
+  # The guard around the prepend matters because bash gets two files below and
+  # a ~/.bash_profile that sources ~/.bashrc — a very common arrangement —
+  # would otherwise stack the same directory onto PATH twice per login.
+  #
+  # ${PATH:+:$PATH} for the same reason as above: an empty PATH would leave a
+  # trailing colon, and an empty PATH component means the current directory.
+  # shellcheck disable=SC2016
+  {
+    echo ""
+    echo "$rc_marker"
+    echo 'case ":$PATH:" in'
+    echo '  *":$HOME/.cempala/bin:"*) ;;'
+    echo '  *) PATH="$HOME/.cempala/bin${PATH:+:$PATH}"; export PATH ;;'
+    echo 'esac'
+  } >> "$file"
+  if [ -n "$created" ]; then
+    echo "→ created $file with the PATH export"
+  elif [ -n "$migrated" ]; then
+    echo "→ replaced the PATH export an earlier installer left in $file"
+  else
+    echo "→ appended PATH export to $file"
+  fi
+}
+
+case "$shell_name" in
+  zsh)
+    # Interactive zsh sources ~/.zshrc whether or not it is a login shell, so
+    # this single file covers every way the user can open a terminal.
+    rc_targets=( "${HOME}/.zshrc" )
+    ;;
+  bash)
+    # Bash does not have zsh's one-file-covers-everything property. A LOGIN
+    # shell reads ~/.bash_profile (falling back to ~/.bash_login, then
+    # ~/.profile) and ignores ~/.bashrc; a non-login interactive shell does the
+    # exact opposite. macOS terminals open login shells, Linux desktop
+    # terminals open non-login ones, and ssh gives you the login path on both —
+    # so there is no single correct file, and choosing one means being wrong
+    # for a large fraction of users. Write one of each. The guarded prepend
+    # above is what makes that safe when both end up being read.
+    login_rc=""
+    for candidate in "${HOME}/.bash_profile" "${HOME}/.bash_login" "${HOME}/.profile"; do
+      if [ -f "$candidate" ]; then
+        login_rc="$candidate"
+        break
+      fi
+    done
+    # None exist yet: bash consults ~/.bash_profile first, so create that one.
+    [ -n "$login_rc" ] || login_rc="${HOME}/.bash_profile"
+    rc_targets=( "$login_rc" "${HOME}/.bashrc" )
+    ;;
+  *)
+    rc_targets=( "${HOME}/.profile" )
+    ;;
+esac
+
+for rc_file in "${rc_targets[@]}"; do
+  append_rc "$rc_file"
 done
 
-if [ -n "$rc_file" ]; then
-  # Append only if the export line isn't already there.
-  if ! grep -qF 'export PATH="$HOME/.cempala/bin:$PATH"' "$rc_file"; then
-    echo "" >> "$rc_file"
-    echo '# cempala installer — added by install.sh' >> "$rc_file"
-    echo 'export PATH="$HOME/.cempala/bin:$PATH"' >> "$rc_file"
-    echo "→ appended PATH export to $rc_file"
-  else
-    echo "→ PATH export already present in $rc_file"
-  fi
-else
-  echo "  ! no shell rc file found (zshrc/bashrc/profile); start a new shell and"
-  echo "    add this to your rc manually: export PATH=\"\$HOME/.cempala/bin:\$PATH\""
-fi
+case "$shell_name" in
+  zsh|bash) ;;
+  *)
+    echo "  ! your login shell (${shell_name:-unknown}) may not read ${rc_targets[0]}; if"
+    echo "    cempala isn't found in a new shell, add its bin dir to PATH the way"
+    echo "    that shell expects: ${bin_dir}"
+    ;;
+esac
 
 # --- 5. cempala --init ---
 echo "→ running cempala --init"
@@ -130,18 +336,32 @@ echo "→ running cempala --init"
 # Flags are passed as real arguments rather than a single word-split string,
 # because the binary path is now absolute and a user whose home contains a
 # space would otherwise have it split into two arguments.
+#
+# They stay in "$@" instead of being copied into a `flags` array, and that is
+# not a style preference. macOS still ships bash 3.2, where expanding an EMPTY
+# array as "${arr[@]}" under `set -u` is an "unbound variable" error rather
+# than nothing at all. `register codex "$bin"` passes no flags, so the array
+# was empty and the installer died there — after claude was registered, before
+# codex was, and before the closing instructions ever printed. "$@" is exempt
+# from that rule in every bash and expands to nothing when there is nothing to
+# expand. The arrays built from it below always have elements, so they are
+# safe to expand normally.
 register() {
   local name="$1"; shift
   local bin="$1"; shift
-  local flags=( "$@" )
-  local add_args=( mcp add cempala "${flags[@]}" -- "$bin" )
-  local remove_args=( mcp remove cempala "${flags[@]}" )
+  local add_args=( mcp add cempala "$@" -- "$bin" )
+  local remove_args=( mcp remove cempala "$@" )
+
+  # Copy-pasteable form of the add command for the messages below. The path is
+  # absolute and may contain spaces, so it is quoted; the flags are joined
+  # only when there are some, so no stray double space appears without them.
+  local hint="$name mcp add cempala"
+  if [ "$#" -gt 0 ]; then hint="$hint $*"; fi
+  hint="$hint -- \"$bin\""
 
   if ! command -v "$name" >/dev/null 2>&1; then
     echo "  ! $name not found on PATH. To register cempala manually once $name is installed, run:"
-    # Quote the path — it is absolute and may contain spaces, and this line
-    # exists to be copy-pasted.
-    echo "      $name mcp add cempala ${flags[*]} -- \"$bin\""
+    echo "      $hint"
     return 0
   fi
 
@@ -178,7 +398,7 @@ register() {
   fi
 
   echo "  ! $name mcp add failed (rc=$rc) — you may need to re-run it manually:"
-  echo "      $name mcp add cempala ${flags[*]} -- \"$bin\""
+  echo "      $hint"
   return 0
 }
 
