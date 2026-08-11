@@ -9,11 +9,13 @@
 // only kept in step by this assertion. Without it, an edit to the installer
 // would silently leave every future uninstall unable to find its own block.
 
-import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join } from "node:path";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, chmodSync, symlinkSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   removePathBlock,
+  removePathBlockFromFile,
   RC_MARKER,
   RC_BODY_CURRENT,
   RC_BODY_LEGACY,
@@ -154,4 +156,89 @@ describe("removePathBlock — file shape is preserved", () => {
     const { text } = removePathBlock(installed);
     expect(text).toBe(original);
   });
+});
+
+describe("removePathBlock — a file that was ONLY our block becomes empty", () => {
+  test("does not leave a stray newline behind", () => {
+    // install.sh creates a startup file from scratch when none exists, so
+    // a file whose entire contents are our block is real. `[].join("\n")
+    // + "\n"` would leave a 1-byte file where there had been no file at
+    // all before us.
+    const { text, removed } = removePathBlock(`${CURRENT_BLOCK}\n`);
+    expect(removed).toBe(1);
+    expect(text).toBe("");
+    expect(text.length).toBe(0);
+  });
+});
+
+describe("removePathBlockFromFile — on disk, with recovery", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cempala-rc-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  function rc(contents: string): string {
+    const p = join(dir, ".zshrc");
+    writeFileSync(p, contents, "utf-8");
+    return p;
+  }
+
+  test("removes the block and reports `removed`", () => {
+    const p = rc(`export EDITOR=vim\n\n${CURRENT_BLOCK}\n`);
+    const r = removePathBlockFromFile(p);
+    expect(r.kind).toBe("removed");
+    expect(readFileSync(p, "utf-8")).toBe("export EDITOR=vim\n");
+  });
+
+  test("reports `unchanged` and rewrites nothing when there is no block", () => {
+    const original = "export EDITOR=vim\n";
+    const p = rc(original);
+    expect(removePathBlockFromFile(p).kind).toBe("unchanged");
+    expect(readFileSync(p, "utf-8")).toBe(original);
+  });
+
+  test("leaves no backup file behind on success", () => {
+    const p = rc(`${CURRENT_BLOCK}\nexport A=1\n`);
+    removePathBlockFromFile(p);
+    expect(readdirSync(dir).filter((f) => f.includes("cempala-bak"))).toEqual([]);
+  });
+
+  test("writes THROUGH a symlink rather than replacing it", () => {
+    // An rc file is very often a symlink into a dotfiles repo. Renaming
+    // onto it would replace the link with a regular file and quietly
+    // detach it from the repo the user manages it in.
+    const real = join(dir, "dotfiles-zshrc");
+    writeFileSync(real, `export EDITOR=vim\n\n${CURRENT_BLOCK}\n`, "utf-8");
+    const link = join(dir, ".zshrc");
+    symlinkSync(real, link);
+
+    expect(removePathBlockFromFile(link).kind).toBe("removed");
+    expect(readFileSync(real, "utf-8")).toBe("export EDITOR=vim\n");
+    // Still a symlink, still pointing at the same file.
+    expect(readFileSync(link, "utf-8")).toBe("export EDITOR=vim\n");
+  });
+
+  test("a missing file reports `failed`, not a crash", () => {
+    const r = removePathBlockFromFile(join(dir, "nope"));
+    expect(r.kind).toBe("failed");
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "an unwritable directory means no backup, so the file is left untouched",
+    () => {
+      // writeFileSync truncates before it writes. Without a recovery copy
+      // a failure partway through leaves a login file empty — so no
+      // backup means no write at all.
+      const p = rc(`export EDITOR=vim\n\n${CURRENT_BLOCK}\n`);
+      const original = readFileSync(p, "utf-8");
+      chmodSync(dir, 0o500); // can rewrite the file, cannot create a backup beside it
+      try {
+        const r = removePathBlockFromFile(p);
+        expect(r.kind).toBe("failed");
+        if (r.kind === "failed") expect(r.error).toContain("recovery copy");
+        expect(readFileSync(p, "utf-8")).toBe(original);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
 });

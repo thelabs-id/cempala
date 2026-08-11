@@ -60,6 +60,13 @@ jobs:
         os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
+      # The uninstaller suite compiles a real cempala to test against — the
+      # script delegates its two delicate steps to the binary, so a stub
+      # would prove almost nothing.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
       # macos-15 is the load-bearing entry, not a nicety. `curl … | bash` on a
       # Mac runs bash 3.2, whose handling of empty arrays under `set -u`
       # differs from every bash a developer is likely to have locally — that
@@ -67,6 +74,13 @@ jobs:
       # the claude registration and before the codex one.
       - name: Installer tests
         run: bash scripts/test-install.sh
+
+      # The uninstaller edits shell startup files, calls other CLIs, and can
+      # be asked to delete the database. Same reason the installer is tested
+      # here: bash 3.2 on macOS behaves differently from any bash a
+      # developer is likely to have locally.
+      - name: Uninstaller tests
+        run: bash scripts/test-uninstall.sh
 
   build:
     name: build all targets

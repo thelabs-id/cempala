@@ -95,9 +95,16 @@ if (ARGS.includes("--unregister-antigravity")) {
   const { unregisterFromAntigravity, describeUnregisterOutcome } = await import("./register-antigravity.ts");
   const outcome = unregisterFromAntigravity();
   process.stdout.write(`${describeUnregisterOutcome(outcome).join("\n")}\n`);
-  // Exit 0 even for `manual`, as registration does: a config we declined
-  // to rewrite is for the user to resolve, not a failed uninstall.
-  process.exit(0);
+  // NON-ZERO on `manual`, unlike registration.
+  //
+  // The two are not symmetric. A registration we declined to write leaves
+  // the user no worse off, so exiting 0 there is honest. A REMOVAL we
+  // declined leaves a live registration pointing at a binary the
+  // uninstaller is about to delete — and the uninstaller decides whether
+  // to delete it by reading this exit status. Reporting success here made
+  // the message on stdout the only trace of a failure that then got acted
+  // on as though it had not happened.
+  process.exit(outcome.kind === "manual" ? 1 : 0);
 }
 
 // `--remove-path-block <rc-file>...` — used by the uninstaller.
@@ -106,29 +113,32 @@ if (ARGS.includes("--unregister-antigravity")) {
 // install.sh must stay self-contained for `curl | bash` and so cannot share
 // a library with it; see src/uninstall-path-block.ts for the full reasoning.
 if (ARGS.includes("--remove-path-block")) {
-  const { removePathBlock } = await import("./uninstall-path-block.ts");
-  const { readFileSync: read, writeFileSync: write, existsSync: exists } = await import("node:fs");
+  const { removePathBlockFromFile } = await import("./uninstall-path-block.ts");
+  const { existsSync: exists } = await import("node:fs");
   const files = ARGS.slice(ARGS.indexOf("--remove-path-block") + 1).filter((a) => !a.startsWith("-"));
   if (files.length === 0) {
     process.stdout.write("  ! --remove-path-block needs at least one file path\n");
-    process.exit(0);
+    process.exit(2);
   }
+  // EXIT NON-ZERO IF ANYTHING FAILED.
+  //
+  // Printing a warning and exiting 0 made the failure invisible to the
+  // only caller that can act on it: uninstall.sh tests this command's
+  // exit status, so a read-only .zshrc produced a warning on stdout, a
+  // successful-looking exit, and then a deleted binary — leaving the user
+  // with a PATH block and nothing left able to remove it.
+  let failed = false;
   for (const f of files) {
     if (!exists(f)) continue;
-    try {
-      const before = read(f, "utf-8");
-      const { text, removed } = removePathBlock(before);
-      if (removed === 0) continue;
-      // Written through the path, not renamed onto it: an rc file is very
-      // often a symlink into a dotfiles repo, and replacing the link with
-      // a regular file would detach it. Same choice install.sh makes.
-      write(f, text, "utf-8");
+    const r = removePathBlockFromFile(f);
+    if (r.kind === "removed") {
       process.stdout.write(`  ✓ removed the PATH export from ${f}\n`);
-    } catch (err) {
-      process.stdout.write(`  ! could not edit ${f} (${err instanceof Error ? err.message : String(err)}); left untouched\n`);
+    } else if (r.kind === "failed") {
+      failed = true;
+      process.stdout.write(`  ! ${f}: ${r.error}\n`);
     }
   }
-  process.exit(0);
+  process.exit(failed ? 1 : 0);
 }
 
 if (ARGS.includes("--version") || ARGS.includes("-v")) {

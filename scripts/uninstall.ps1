@@ -33,6 +33,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Set when a cleanup step fails. It changes two things at the end: the
+# binary is KEPT (it is the only thing that can retry the step that
+# failed), and the closing banner reports a partial uninstall instead of
+# claiming success over the top of a warning.
+$cleanupFailed = $false
+
 $cempalaHome = Join-Path $env:USERPROFILE ".cempala"
 $binDir      = Join-Path $cempalaHome "bin"
 $bin         = Join-Path $binDir "cempala.exe"
@@ -83,6 +89,10 @@ function Unregister-Cli {
   } elseif ($r.Output -match "no mcp server|not found|does not exist") {
     Write-Host "  [ok] $Name had no cempala registration"
   } else {
+    # A GENUINE failure counts as a failed cleanup. Warning and carrying on
+    # meant the binary was deleted anyway and the run ended with a success
+    # banner, leaving a live registration pointing at nothing.
+    $script:cleanupFailed = $true
     Write-Host "  ! could not unregister from $Name -- run it yourself:"
     Write-Host "      $Name $($RemoveArgs -join ' ')"
     if ($r.Output) { Write-Host "      $($r.Output)" }
@@ -105,8 +115,19 @@ if ($canUnregister) {
   } else {
     $r = Invoke-Cli -Exe $bin -CliArgs @("--unregister-antigravity")
     if ($r.Output) { Write-Host $r.Output }
+    # The exit code was ignored here, so a crash or a failed write was
+    # followed by the global success banner all the same.
+    if ($r.ExitCode -ne 0) {
+      $cleanupFailed = $true
+      Write-Host "  ! antigravity unregistration failed; edit $agConfig by hand"
+    }
   }
 } elseif ((Test-Path $agConfig) -and (Select-String -Path $agConfig -Pattern '"cempala"' -Quiet)) {
+  # A registration we could not remove is LIVE CONFIGURATION LEFT BEHIND,
+  # not a note in passing. Carrying on let the run end with a success
+  # banner -- and under -Purge it would delete the database while
+  # Antigravity still pointed at a binary about to vanish.
+  $cleanupFailed = $true
   Write-Host "  ! this cempala build cannot unregister itself from Antigravity."
   Write-Host "    Remove the `"cempala`" entry from `"mcpServers`" in:"
   Write-Host "      $agConfig"
@@ -126,27 +147,101 @@ $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 if ([string]::IsNullOrEmpty($userPath)) {
   Write-Host "  . user PATH is empty; nothing to remove"
 } else {
-  $parts = $userPath -split ';'
-  $kept  = $parts | Where-Object { $_.TrimEnd('\') -ne $binDir.TrimEnd('\') -and $_ -ne "" }
-  if ($kept.Count -eq $parts.Count) {
-    Write-Host "  . $binDir was not on your user PATH"
+  # Drop ONLY our own entries -- ours and the legacy %LOCALAPPDATA% one
+  # install.ps1 also cleans up. Everything else is kept exactly as found,
+  # INCLUDING empty components.
+  #
+  # Filtering empty entries out as well looked like tidying and was a bug
+  # twice over. A user PATH ending in a trailing semicolon splits to a
+  # final empty element, so the count changed even when cempala was never
+  # on PATH -- and the script would then rewrite a PATH it had no business
+  # touching and report "removed it", having removed nothing of ours.
+  $legacyBin = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Cempala\bin" } else { $null }
+  $isOurs = {
+    param($entry)
+    $e = $entry.TrimEnd('\')
+    ($e -eq $binDir.TrimEnd('\')) -or ($legacyBin -and $e -eq $legacyBin.TrimEnd('\'))
+  }
+  $parts   = $userPath -split ';'
+  $kept    = @($parts | Where-Object { -not (& $isOurs $_) })
+  $dropped = $parts.Count - $kept.Count
+
+  if ($dropped -eq 0) {
+    Write-Host "  . cempala was not on your user PATH"
   } elseif ($DryRun) {
-    Write-Host "    would remove $binDir from the user PATH"
+    Write-Host "    would remove $dropped cempala entr$(if ($dropped -eq 1) { 'y' } else { 'ies' }) from the user PATH"
   } else {
     [Environment]::SetEnvironmentVariable("PATH", ($kept -join ';'), "User")
     Write-Host "  [ok] removed it from the user PATH"
   }
 }
 
-# --- 4. The install directory ------------------------------------------------
+# --- 4. The legacy install location -------------------------------------------
+#
+# install.ps1 cleans up %LOCALAPPDATA%\Cempala\bin, which is where the
+# original builds put the binary. Someone uninstalling may never have run
+# a version that migrated them off it, so an uninstaller that only knows
+# the current location leaves that copy behind forever.
+if ($env:LOCALAPPDATA) {
+  $legacyHome = Join-Path $env:LOCALAPPDATA "Cempala"
+  if (Test-Path $legacyHome) {
+    Write-Host ""
+    Write-Host "-> removing the legacy install at $legacyHome"
+    if ($DryRun) {
+      Write-Host "    would remove $legacyHome"
+    } else {
+      Remove-Item -Path $legacyHome -Recurse -Force -ErrorAction SilentlyContinue
+      if (Test-Path $legacyHome) {
+        $cleanupFailed = $true
+        Write-Host "  ! could not remove $legacyHome (in use?); delete it by hand"
+      } else {
+        Write-Host "  [ok] removed $legacyHome"
+      }
+    }
+  }
+}
+
+# --- 5. The install directory --------------------------------------------------
 Write-Host ""
-if ($Purge) {
+if ($Purge -and $cleanupFailed) {
+  # PURGE IS SKIPPED when a step failed. -Purge deletes the binary along
+  # with everything else, so purging after a failure removes the one tool
+  # able to retry -- while destroying the database irreversibly, on a
+  # system left half uninstalled. Refusing is recoverable; this is not.
+  Write-Host "-> NOT purging: a step above failed"
+  Write-Host "  . $cempalaHome was left alone, including your data"
+  Write-Host "    Fix what is reported above, then re-run with -Purge."
+} elseif ($Purge) {
   Write-Host "-> removing .cempala (including the database and audit log)"
   if ($DryRun) {
     Write-Host "    would remove $cempalaHome"
   } elseif (Test-Path $cempalaHome) {
+    # VERIFY, do not assume. -ErrorAction SilentlyContinue swallowed every
+    # failure here and the next line printed success regardless — so a
+    # locked cempala.db left the directory on disk while the script said
+    # it was gone. That is worst precisely for -Purge, whose whole promise
+    # is that the database and audit log are deleted.
     Remove-Item -Path $cempalaHome -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  [ok] removed $cempalaHome"
+    if (Test-Path $cempalaHome) {
+      $cleanupFailed = $true
+      Write-Host "  ! could not fully remove $cempalaHome"
+      Write-Host "    Something in it is still in use — close any running agent session and"
+      Write-Host "    delete the folder by hand. Your data has NOT been removed."
+    } else {
+      Write-Host "  [ok] removed $cempalaHome"
+    }
+  } else {
+    Write-Host "  . $cempalaHome does not exist"
+  }
+} elseif ($cleanupFailed) {
+  # Where a binary exists it is what would retry, so it stays. Where there
+  # is not one, say so rather than claiming to have kept something absent.
+  if (Test-Path $bin) {
+    Write-Host "-> keeping the binary: a cleanup step failed and you will need it to retry"
+    Write-Host "  . left $bin in place"
+  } else {
+    Write-Host "-> no binary to remove"
+    Write-Host "  . a cleanup step failed; see above for what to finish by hand"
   }
 } else {
   Write-Host "-> removing the binary, keeping your data"
@@ -169,6 +264,7 @@ if ($Purge) {
           Write-Host "       $aside"
           Write-Host "       Delete it once you have closed the agent sessions using it."
         } catch {
+          $cleanupFailed = $true
           Write-Host "  ! could not remove $bin -- close any running agent session and delete it by hand"
         }
       }
@@ -182,6 +278,21 @@ Write-Host ""
 if ($DryRun) {
   Write-Host "[ok] dry run complete -- nothing was changed."
   return
+}
+if ($cleanupFailed) {
+  Write-Host "! cempala was PARTIALLY uninstalled."
+  Write-Host ""
+  Write-Host "One or more steps above could not be completed."
+  if (Test-Path $bin) {
+    Write-Host "The binary was kept so you can retry:"
+    Write-Host "  $bin"
+    Write-Host "Fix what the message above reports, then re-run this script."
+  } else {
+    Write-Host "There is no cempala binary able to finish the job on this machine,"
+    Write-Host "so the remaining steps have to be done by hand -- see above for"
+    Write-Host "exactly which files and lines."
+  }
+  exit 1
 }
 Write-Host "[ok] cempala uninstalled."
 Write-Host ""

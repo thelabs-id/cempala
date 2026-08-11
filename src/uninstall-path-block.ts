@@ -34,6 +34,10 @@
 //   - Line endings are preserved, and a file that ended without a final
 //     newline still ends without one.
 
+import { readFileSync, writeFileSync, copyFileSync, unlinkSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
+import { randomBytes } from "node:crypto";
+
 /** The comment line install.sh writes above its PATH block. */
 export const RC_MARKER = "# cempala installer — added by install.sh";
 
@@ -112,5 +116,82 @@ export function removePathBlock(text: string): RemovePathBlockResult {
   }
 
   if (removed === 0) return { text, removed: 0 };
+
+  // An emptied file becomes genuinely empty, not a lone newline.
+  // install.sh creates a startup file from scratch when none exists, so a
+  // file whose entire contents were our block is a real case — and
+  // `[].join("\n") + "\n"` would leave a 1-byte file behind where there
+  // had been nothing before us.
+  if (out.length === 0) return { text: "", removed };
+
   return { text: out.join("\n") + (endsWithNewline ? "\n" : ""), removed };
+}
+
+/** What happened to one file. */
+export type FileRemovalResult =
+  | { kind: "unchanged"; path: string }
+  | { kind: "removed"; path: string }
+  | { kind: "failed"; path: string; error: string };
+
+/**
+ * Remove the PATH block from a file on disk, with a recovery copy.
+ *
+ * `writeFileSync` truncates before it writes, so a failure partway through
+ * — ENOSPC is the ordinary way — leaves a shell startup file empty or
+ * half-written. That is someone's login environment, and an uninstaller
+ * that can destroy it is worse than one that does nothing. The Antigravity
+ * config path already took a backup first for exactly this reason; this
+ * one did not, which was an inconsistency with no justification behind it.
+ *
+ * The file is written THROUGH rather than renamed onto: an rc file is very
+ * often a symlink into a dotfiles repo, and a rename would replace the
+ * link with a regular file and detach it. Same choice install.sh makes.
+ */
+export function removePathBlockFromFile(path: string): FileRemovalResult {
+  let before: string;
+  try {
+    before = readFileSync(path, "utf-8");
+  } catch (err) {
+    return { kind: "failed", path, error: `could not read it (${msg(err)})` };
+  }
+
+  const { text, removed } = removePathBlock(before);
+  if (removed === 0) return { kind: "unchanged", path };
+
+  const backup = join(dirname(path), `.${basename(path)}.cempala-bak.${randomBytes(6).toString("hex")}`);
+  try {
+    copyFileSync(path, backup);
+  } catch (err) {
+    // No recovery copy means no write. Leaving the block in place is a
+    // nuisance; truncating a login file is not.
+    return { kind: "failed", path, error: `could not create a recovery copy first (${msg(err)}), so it was left untouched` };
+  }
+
+  try {
+    writeFileSync(path, text, "utf-8");
+  } catch (err) {
+    // Put it back. Unlike the Antigravity config there is no foreign
+    // writer to worry about here — nothing else edits a shell rc file
+    // mid-uninstall — so an unconditional restore is the right move.
+    let restored = true;
+    try {
+      copyFileSync(backup, path);
+    } catch {
+      restored = false;
+    }
+    const suffix = restored
+      ? "; the original was restored"
+      : `; the original is saved at ${backup}`;
+    if (restored) {
+      try { unlinkSync(backup); } catch { /* best effort */ }
+    }
+    return { kind: "failed", path, error: `could not write it (${msg(err)})${suffix}` };
+  }
+
+  try { unlinkSync(backup); } catch { /* best effort */ }
+  return { kind: "removed", path };
+}
+
+function msg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

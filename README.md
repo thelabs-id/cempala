@@ -54,7 +54,7 @@ Every `dispatch` also writes a task row, so the synchronous and mailbox paths sh
 - **Shared task queue.** Or leave it for the other agent to pick up later.
 - **Plain-language requests.** No commands or config to learn.
 - **Complete audit log.** Every handoff records the request, the folder it ran in, how long it took, and how it ended.
-- **Local-first.** No account, no server to sign into, no open port. Everything lives in `~/.cempala/`, and [`uninstall.sh`](#uninstalling) removes it cleanly.
+- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installing also registers cempala with each agent CLI, and [`uninstall.sh`](#uninstalling) undoes all of it.
 - **Honest network control.** Handoffs run offline by default, and each result reports exactly what was enforced.
 
 ## Requirements

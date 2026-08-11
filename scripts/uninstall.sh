@@ -52,6 +52,12 @@ done
 bin_dir="${HOME}/.cempala/bin"
 bin="${bin_dir}/cempala"
 
+# Set when a cleanup step fails. It changes two things at the end: the
+# binary is KEPT (it is the only thing that can retry the step that
+# failed), and the closing banner says the uninstall was partial instead
+# of claiming success over the top of a warning.
+cleanup_failed=0
+
 say() { echo "$@"; }
 run() {
   # In dry-run mode, show the command instead of running it. Everything
@@ -96,6 +102,11 @@ unregister_cli() {
     if printf '%s' "$out" | grep -qi "no mcp server\|not found\|does not exist"; then
       say "  ✓ $name had no cempala registration"
     else
+      # A GENUINE failure counts as a failed cleanup. Warning and carrying
+      # on meant the binary was deleted anyway and the run ended with a
+      # success banner, leaving a live registration pointing at nothing —
+      # the precise outcome this whole script exists to prevent.
+      cleanup_failed=1
       say "  ! could not unregister from $name — run it yourself:"
       say "      $name mcp remove cempala $*"
       [ -n "$out" ] && say "      $out"
@@ -123,10 +134,18 @@ if [ -x "$bin" ] && "$bin" --help </dev/null 2>/dev/null | grep -q -- "--unregis
   if [ "$dry_run" = "1" ]; then
     echo "    would run: $bin --unregister-antigravity"
   else
-    "$bin" --unregister-antigravity </dev/null || \
+    if ! "$bin" --unregister-antigravity </dev/null; then
+      cleanup_failed=1
       say "  ! antigravity unregistration failed; edit $ag_config by hand"
+    fi
   fi
 elif [ -f "$ag_config" ] && grep -q '"cempala"' "$ag_config" 2>/dev/null; then
+  # A registration we could not remove is LIVE CONFIGURATION LEFT BEHIND,
+  # not a note in passing. Printing instructions and carrying on let the
+  # run finish with a success banner — and under --purge it would delete
+  # the database while Antigravity still pointed at a binary that was
+  # about to vanish.
+  cleanup_failed=1
   say "  ! this cempala build cannot unregister itself from Antigravity."
   say "    Remove the \"cempala\" entry from \"mcpServers\" in:"
   say "      $ag_config"
@@ -168,8 +187,14 @@ elif [ -x "$bin" ] && "$bin" --help </dev/null 2>/dev/null | grep -q -- "--remov
   if [ "$dry_run" = "1" ]; then
     echo "    would run: $bin --remove-path-block ${existing_rc[*]}"
   else
-    "$bin" --remove-path-block "${existing_rc[@]}" </dev/null || \
-      say "  ! could not strip the PATH export; remove it by hand"
+    if ! "$bin" --remove-path-block "${existing_rc[@]}" </dev/null; then
+      # KEEP THE BINARY. It is the only thing that can safely retry this,
+      # and deleting it here would strand the user with a PATH block and
+      # no tool able to remove it. Reporting a partial uninstall and
+      # leaving the means to finish beats a tidy-looking failure.
+      cleanup_failed=1
+      say "  ! the PATH export could not be removed (see above)"
+    fi
   fi
 else
   # There IS a block, but no binary able to remove it — an old build, or
@@ -177,7 +202,10 @@ else
   # sed: the rules that keep this safe (marker required, line endings
   # preserved, a missing final newline preserved) are exactly the ones a
   # quick one-liner gets wrong, and getting them wrong corrupts a shell
-  # config. Name the files and the line instead.
+  # config. Name the files and the line instead — and count it as a
+  # failure, because a PATH export left in place is exactly the residue
+  # this script exists to remove.
+  cleanup_failed=1
   say "  ! this cempala build cannot strip the PATH export."
   say "    Delete this line and the block below it, in:"
   for f in "${existing_rc[@]}"; do say "      $f"; done
@@ -185,10 +213,31 @@ fi
 
 # --- 4. The install directory ------------------------------------------------
 echo
-if [ "$purge" = "1" ]; then
+if [ "$purge" = "1" ] && [ "$cleanup_failed" = "1" ]; then
+  # PURGE IS SKIPPED when a step failed, and this ordering is the point.
+  # `--purge` deletes the binary along with everything else, so purging
+  # after a failure would remove the one tool able to retry — and do it
+  # while destroying the database, irreversibly, on a system left half
+  # uninstalled. Refusing is recoverable; the alternative is not.
+  echo "→ NOT purging: a step above failed"
+  say "  · ${HOME}/.cempala was left alone, including your data"
+  say "    Fix what is reported above, then re-run with --purge."
+elif [ "$purge" = "1" ]; then
   echo "→ removing ~/.cempala (including the database and audit log)"
   run rm -rf "${HOME}/.cempala"
   [ "$dry_run" = "1" ] || say "  ✓ removed ${HOME}/.cempala"
+elif [ "$cleanup_failed" = "1" ]; then
+  # Something above could not be undone. Where a binary exists it is what
+  # would undo it on a retry, so it stays. Where there ISN'T one — an old
+  # build already removed, or never installed — say that instead of
+  # claiming to have kept something that is not there.
+  if [ -e "$bin" ]; then
+    echo "→ keeping the binary: a cleanup step failed and you will need it to retry"
+    say "  · left $bin in place"
+  else
+    echo "→ no binary to remove"
+    say "  · a cleanup step failed; see above for what to finish by hand"
+  fi
 else
   echo "→ removing the binary, keeping your data"
   if [ -e "$bin" ]; then
@@ -208,6 +257,24 @@ echo
 if [ "$dry_run" = "1" ]; then
   echo "✓ dry run complete — nothing was changed."
   exit 0
+fi
+
+if [ "$cleanup_failed" = "1" ]; then
+  # Do not print a success banner over the top of a warning. A user who
+  # scrolls to the last line has to see that this did not finish.
+  echo "! cempala was PARTIALLY uninstalled."
+  echo
+  echo "One or more steps above could not be completed."
+  if [ -e "$bin" ]; then
+    echo "The binary was kept so you can retry:"
+    echo "  $bin"
+    echo "Fix what the message above reports, then re-run this script."
+  else
+    echo "There is no cempala binary able to finish the job on this machine,"
+    echo "so the remaining steps have to be done by hand — see above for"
+    echo "exactly which files and lines."
+  fi
+  exit 1
 fi
 
 echo "✓ cempala uninstalled."

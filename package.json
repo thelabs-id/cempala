@@ -15,6 +15,7 @@
     "test": "bun test test/unit",
     "test:integration": "CEMPALA_INTEGRATION=1 bun test test/integration",
     "test:install": "bash scripts/test-install.sh",
+    "test:uninstall": "bash scripts/test-uninstall.sh",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
