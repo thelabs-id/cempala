@@ -615,8 +615,17 @@ register codex  "${bin_dir}/cempala"
 # is read by the Antigravity IDE, which people install without ever putting
 # the CLI on PATH. The only cost of writing it for someone who has neither
 # is one unused entry in a file Antigravity would have created anyway.
+#
+# `</dev/null` is load-bearing. A cempala older than this flag does not
+# reject it — it falls through to starting the stdio MCP server and reads
+# stdin. That is reachable in two ordinary ways: installing while the
+# newest release predates the flag, and `CEMPALA_VERSION=v0.1.0` pinning an
+# old build on purpose, which this script explicitly supports. With a
+# terminal on stdin the server would sit there waiting forever; under
+# `curl | bash` the child inherits the pipe bash is still reading the script
+# from. An immediate EOF makes such a binary exit at once instead.
 echo "→ registering cempala with Antigravity"
-"${bin_dir}/cempala" --register-antigravity "${bin_dir}/cempala" || \
+"${bin_dir}/cempala" --register-antigravity "${bin_dir}/cempala" </dev/null || \
   echo "  ! antigravity registration step failed; cempala is otherwise installed"
 
 cat <<'EOF'

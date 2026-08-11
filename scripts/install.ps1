@@ -195,12 +195,22 @@ try {
     ($CliArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
   }
 
+  # -NoStdin closes the child's input immediately. A cempala older than the
+  # --register-antigravity flag does not reject it -- it falls through to
+  # starting the stdio MCP server and reads stdin, which with a console
+  # attached means waiting forever. Reachable whenever the newest release
+  # predates the flag, and permanently for anyone pinning an old build with
+  # $env:CEMPALA_VERSION. An empty pipeline gives it EOF at once.
   function Invoke-Cli {
-    param([string]$Exe, [string[]]$CliArgs)
+    param([string]$Exe, [string[]]$CliArgs, [switch]$NoStdin)
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-      $out = & $Exe @CliArgs 2>&1
+      if ($NoStdin) {
+        $out = $null | & $Exe @CliArgs 2>&1
+      } else {
+        $out = & $Exe @CliArgs 2>&1
+      }
       return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($out | Out-String).Trim()) }
     } finally {
       $ErrorActionPreference = $prevEAP
@@ -274,7 +284,7 @@ try {
   # Run unconditionally rather than only when `agy` is on PATH: the same file
   # is read by the Antigravity IDE, which many people install without the CLI.
   Write-Host "-> registering cempala with Antigravity"
-  $agResult = Invoke-Cli -Exe $dest -CliArgs @("--register-antigravity", $dest)
+  $agResult = Invoke-Cli -Exe $dest -CliArgs @("--register-antigravity", $dest) -NoStdin
   if ($agResult.Output) { Write-Host $agResult.Output }
   if ($agResult.ExitCode -ne 0) {
     Write-Host "  ! antigravity registration step failed; cempala is otherwise installed"

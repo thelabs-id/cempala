@@ -27,6 +27,30 @@ import { approvePath } from "./tools/approve-path.ts";
 import { sweepStaleTasks } from "./reaper.ts";
 import { appendAudit } from "./audit.ts";
 
+/**
+ * The version cempala reports, to `--version` and to every MCP client in
+ * the `initialize` handshake.
+ *
+ * Hard-coded rather than read from package.json: the shipped artifact is a
+ * compiled binary with no package.json beside it, so a runtime read would
+ * work in development and fail in the one place it matters.
+ *
+ * It therefore has to be kept in step with package.json BY HAND. There
+ * were previously three copies of this string — here, in the Server
+ * constructor below, and in package.json — and two of them were free to
+ * drift without anything noticing. One constant now feeds both call sites,
+ * and test/unit/mcp-server.test.ts asserts it matches package.json, so the
+ * remaining pair cannot silently disagree.
+ *
+ * DECLARED HERE, above the argument handling, and not beside the function
+ * that returns it. A `const` is in the temporal dead zone until execution
+ * reaches it, and `--version` is handled a few lines below: declared lower
+ * down, `cempala --version` printed "cempala undefined". The bug is
+ * invisible to a test that imports this module, because an import runs the
+ * file to completion before asserting anything.
+ */
+export const CEMPALA_VERSION = "0.2.0";
+
 const ARGS = process.argv.slice(2);
 
 if (ARGS.includes("--init")) {
@@ -75,9 +99,7 @@ if (ARGS.includes("--help") || ARGS.includes("-h")) {
 }
 
 function pkgVersion(): string {
-  // Hard-coded; package.json version is the source. Avoid reading fs
-  // at runtime since the binary is compiled.
-  return "0.1.0";
+  return CEMPALA_VERSION;
 }
 
 function usage(): string {
@@ -109,7 +131,7 @@ const db: DB = openDatabase(cfg.server.db_path);
 const server = new Server(
   {
     name: "cempala",
-    version: "0.1.0",
+    version: CEMPALA_VERSION,
   },
   {
     capabilities: {

@@ -85,6 +85,43 @@ async function startServer(): Promise<ServerHandle> {
   };
 }
 
+describe("version reporting", () => {
+  // The binary cannot read package.json at runtime, so the version is
+  // hard-coded — which means nothing but these tests stops the two from
+  // drifting. A release built from a stale constant reports the wrong
+  // version to every MCP client in the initialize handshake, and to anyone
+  // running `cempala --version` to check what they installed.
+  async function pkgVersion(): Promise<string> {
+    return JSON.parse(await Bun.file(join(process.cwd(), "package.json")).text()).version;
+  }
+
+  test("`--version` prints the package.json version", async () => {
+    // Run it as a PROCESS, not as an import. `--version` is handled during
+    // module evaluation, so importing the module runs the file to
+    // completion and then asserts — which cannot see an ordering fault in
+    // the file itself. A `const` declared below this handler is in the
+    // temporal dead zone when it fires, and that really did ship
+    // "cempala undefined" for a moment; only spawning catches it.
+    const proc = spawn({ cmd: ["bun", "run", "src/index.ts", "--version"], cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(out.trim()).toBe(`cempala ${await pkgVersion()}`);
+    expect(out).not.toContain("undefined");
+  });
+
+  test("the version advertised over MCP matches package.json", async () => {
+    const s = await startServer();
+    try {
+      await s.send({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test-client", version: "0.1.0" } },
+      });
+      const r = await s.readOne();
+      expect((r?.result as any)?.serverInfo?.version).toBe(await pkgVersion());
+    } finally { s.close(); }
+  });
+});
+
 describe("MCP server (end-to-end via stdio)", () => {
   test("initialize handshake returns server info", async () => {
     const s = await startServer();
