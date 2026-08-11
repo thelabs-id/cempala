@@ -49,7 +49,7 @@ import { appendAudit } from "./audit.ts";
  * invisible to a test that imports this module, because an import runs the
  * file to completion before asserting anything.
  */
-export const CEMPALA_VERSION = "0.2.0";
+export const CEMPALA_VERSION = "0.3.0";
 
 const ARGS = process.argv.slice(2);
 
