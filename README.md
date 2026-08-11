@@ -8,7 +8,7 @@
 
 **One agent asks. The other just does it.** Same machine, plain language, one turn.
 
-Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code, Codex CLI and Antigravity working together. Ask one for something and it pulls in another, right there in the same session. No second window, no copy-paste, no cloud.
+Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code, Codex CLI and Antigravity working together. Ask one for something and it pulls in another, right there in the same session. No second window, no copy-paste, no cloud service in the middle.
 
 <p>
 <a href="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml"><img alt="verify" src="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml/badge.svg" /></a>
@@ -54,7 +54,7 @@ Every `dispatch` also writes a task row, so the synchronous and mailbox paths sh
 - **Shared task queue.** Or leave it for the other agent to pick up later.
 - **Plain-language requests.** No commands or config to learn.
 - **Complete audit log.** Every handoff records the request, the folder it ran in, how long it took, and how it ended.
-- **Local-first.** No account, no server to sign into, no open port. Delete `~/.cempala/` and it's gone.
+- **Local-first.** No account, no server to sign into, no open port. Everything lives in `~/.cempala/`, and [`uninstall.sh`](#uninstalling) removes it cleanly.
 - **Honest network control.** Handoffs run offline by default, and each result reports exactly what was enforced.
 
 ## Requirements
@@ -123,6 +123,26 @@ The script is idempotent. Re-running it (e.g. to upgrade) leaves your machine in
 - `config.toml` is left untouched, and the MCP registrations are re-pointed at the new binary without duplicating them.
 
 Editing your shell config is the part with the least room for error, so on macOS and Linux the rules are narrow: a block is only ever removed together with the marker comment the installer itself wrote. Matching text without that marker — in a heredoc, a quoted string, or a line you wrote yourself — is left alone, and so are your line endings and a missing final newline. An rc file that's a symlink into a dotfiles repo is written *through*, so it stays a symlink.
+
+## Uninstalling
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uninstall.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uninstall.ps1 | iex
+```
+
+**Deleting `~/.cempala/` on its own is not enough**, which is why this exists. Installing writes to four places, and three of them are other programs' config files: the install directory, your shell's `PATH`, an MCP registration in Claude Code and Codex each, and an entry in Antigravity's `mcp_config.json`. Remove only the directory and those three registrations survive, each pointing at a binary that no longer exists — so every launch of every agent CLI reports cempala as a failed server, indefinitely, until you find and edit three config files by hand.
+
+The uninstaller undoes all four:
+
+- **Registrations** go through each CLI's own `mcp remove`, so their config files stay theirs to edit. Only Antigravity, which ships no such command, is edited directly — one key removed, every other server and setting left exactly as it was, and the file never deleted, because it's Antigravity's rather than ours.
+- **The `PATH` export** is removed only where the marker comment the installer wrote is still present. A block someone has edited, a commented-out copy, or a file that merely mentions the same path is left alone — and your line endings and a missing final newline are preserved. Install then uninstall returns a startup file to its original bytes.
+- **Your data is kept.** `~/.cempala/` holds the task history and the audit log; that's a record, not installation debris, and uninstalling the software isn't an instruction to discard it. Pass `--purge` (`-Purge` on Windows) to remove it too.
+
+`--dry-run` prints exactly what would happen and changes nothing.
 
 ## The 8 MCP tools
 

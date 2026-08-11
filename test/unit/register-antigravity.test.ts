@@ -11,7 +11,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, utimesSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerWithAntigravity, describeOutcome, SERVER_KEY, backupPathFor, acquireLock } from "../../src/register-antigravity.ts";
+import { registerWithAntigravity, unregisterFromAntigravity, describeOutcome, describeUnregisterOutcome, SERVER_KEY, backupPathFor, acquireLock } from "../../src/register-antigravity.ts";
 
 const BIN = "/home/someone/.cempala/bin/cempala";
 
@@ -406,6 +406,105 @@ describe("describeOutcome", () => {
       const lines = describeOutcome(o);
       expect(lines.length).toBeGreaterThan(0);
       expect(lines.join("\n")).toContain(cfgPath);
+    }
+  });
+});
+
+describe("unregisterFromAntigravity — removing only what we put there", () => {
+  test("removes cempala and leaves every other server untouched", () => {
+    write(JSON.stringify({
+      mcpServers: {
+        "sqlite-explorer": { command: "node", args: ["/x.js"] },
+        [SERVER_KEY]: { command: BIN },
+        "my-remote": { serverUrl: "https://api.example.com/mcp/" },
+      },
+      someOtherSetting: { deep: [1, 2, 3] },
+    }, null, 2));
+
+    const o = unregisterFromAntigravity({ configPath: cfgPath });
+    expect(o.kind).toBe("removed");
+
+    const after = read();
+    expect(after.mcpServers[SERVER_KEY]).toBeUndefined();
+    expect(after.mcpServers["sqlite-explorer"].args).toEqual(["/x.js"]);
+    expect(after.mcpServers["my-remote"].serverUrl).toBe("https://api.example.com/mcp/");
+    expect(after.someOtherSetting).toEqual({ deep: [1, 2, 3] });
+  });
+
+  test("leaves an empty mcpServers object rather than tidying it away", () => {
+    // An empty `mcpServers` is what Antigravity itself creates on first
+    // run. Removing it would be us editing a file we were asked to
+    // withdraw from.
+    write(JSON.stringify({ mcpServers: { [SERVER_KEY]: { command: BIN } } }));
+    expect(unregisterFromAntigravity({ configPath: cfgPath }).kind).toBe("removed");
+    expect(read().mcpServers).toEqual({});
+  });
+
+  test("never deletes the file — it is Antigravity's, not ours", () => {
+    write(JSON.stringify({ mcpServers: { [SERVER_KEY]: { command: BIN } } }));
+    unregisterFromAntigravity({ configPath: cfgPath });
+    expect(existsSync(cfgPath)).toBe(true);
+  });
+
+  test("a missing config is `absent`, not an error", () => {
+    expect(unregisterFromAntigravity({ configPath: cfgPath }).kind).toBe("absent");
+  });
+
+  test("a config without a cempala entry is `absent` and is not rewritten", () => {
+    const original = JSON.stringify({ mcpServers: { other: { command: "x" } } }, null, 2);
+    write(original);
+    expect(unregisterFromAntigravity({ configPath: cfgPath }).kind).toBe("absent");
+    expect(readFileSync(cfgPath, "utf-8")).toBe(original);
+  });
+
+  test("an empty file is `absent`", () => {
+    write("   \n");
+    expect(unregisterFromAntigravity({ configPath: cfgPath }).kind).toBe("absent");
+  });
+
+  test("unparseable JSON is left byte-for-byte untouched", () => {
+    // Same refusal as registration: removing our entry by text surgery
+    // could corrupt however many others the user has.
+    const original = '{"mcpServers": {"important": {"command": "keepme"},}}';
+    write(original);
+    const o = unregisterFromAntigravity({ configPath: cfgPath });
+    expect(o.kind).toBe("manual");
+    expect(readFileSync(cfgPath, "utf-8")).toBe(original);
+    if (o.kind === "manual") expect(o.snippet).toContain(SERVER_KEY);
+  });
+
+  test("a live foreign lock makes us refuse rather than write", () => {
+    write(JSON.stringify({ mcpServers: { [SERVER_KEY]: { command: BIN } } }));
+    const original = readFileSync(cfgPath, "utf-8");
+    writeFileSync(`${cfgPath}.cempala-lock`, "someone-else", "utf-8");
+    const o = unregisterFromAntigravity({ configPath: cfgPath });
+    expect(o.kind).toBe("manual");
+    expect(readFileSync(cfgPath, "utf-8")).toBe(original);
+  }, { timeout: 15_000 });
+
+  test("register then unregister returns the config to its original shape", () => {
+    const original = JSON.stringify({ mcpServers: { other: { command: "x" } } }, null, 2) + "\n";
+    write(original);
+    expect(registerWithAntigravity({ binaryPath: BIN, configPath: cfgPath }).kind).toBe("updated");
+    expect(read().mcpServers[SERVER_KEY].command).toBe(BIN);
+    expect(unregisterFromAntigravity({ configPath: cfgPath }).kind).toBe("removed");
+    expect(readFileSync(cfgPath, "utf-8")).toBe(original);
+  });
+
+  test("leaves no lock or backup file behind", () => {
+    write(JSON.stringify({ mcpServers: { [SERVER_KEY]: { command: BIN } } }));
+    unregisterFromAntigravity({ configPath: cfgPath });
+    const junk = readdirSync(join(dir, "config")).filter((f) => f.includes("cempala-bak") || f.includes("cempala-lock"));
+    expect(junk).toEqual([]);
+  });
+
+  test("describeUnregisterOutcome always names the path", () => {
+    for (const o of [
+      { kind: "removed" as const, path: cfgPath },
+      { kind: "absent" as const, path: cfgPath },
+      { kind: "manual" as const, path: cfgPath, reason: "because", snippet: "do it yourself" },
+    ]) {
+      expect(describeUnregisterOutcome(o).join("\n")).toContain(cfgPath);
     }
   });
 });

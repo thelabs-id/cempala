@@ -88,6 +88,49 @@ if (ARGS.includes("--register-antigravity")) {
   process.exit(0);
 }
 
+// `--unregister-antigravity` — the inverse of the flag above, used by the
+// uninstaller. Removes only cempala's own entry, leaving every other
+// server and top-level key alone, and never deletes the file.
+if (ARGS.includes("--unregister-antigravity")) {
+  const { unregisterFromAntigravity, describeUnregisterOutcome } = await import("./register-antigravity.ts");
+  const outcome = unregisterFromAntigravity();
+  process.stdout.write(`${describeUnregisterOutcome(outcome).join("\n")}\n`);
+  // Exit 0 even for `manual`, as registration does: a config we declined
+  // to rewrite is for the user to resolve, not a failed uninstall.
+  process.exit(0);
+}
+
+// `--remove-path-block <rc-file>...` — used by the uninstaller.
+//
+// The removal rule lives in the binary rather than in uninstall.sh because
+// install.sh must stay self-contained for `curl | bash` and so cannot share
+// a library with it; see src/uninstall-path-block.ts for the full reasoning.
+if (ARGS.includes("--remove-path-block")) {
+  const { removePathBlock } = await import("./uninstall-path-block.ts");
+  const { readFileSync: read, writeFileSync: write, existsSync: exists } = await import("node:fs");
+  const files = ARGS.slice(ARGS.indexOf("--remove-path-block") + 1).filter((a) => !a.startsWith("-"));
+  if (files.length === 0) {
+    process.stdout.write("  ! --remove-path-block needs at least one file path\n");
+    process.exit(0);
+  }
+  for (const f of files) {
+    if (!exists(f)) continue;
+    try {
+      const before = read(f, "utf-8");
+      const { text, removed } = removePathBlock(before);
+      if (removed === 0) continue;
+      // Written through the path, not renamed onto it: an rc file is very
+      // often a symlink into a dotfiles repo, and replacing the link with
+      // a regular file would detach it. Same choice install.sh makes.
+      write(f, text, "utf-8");
+      process.stdout.write(`  ✓ removed the PATH export from ${f}\n`);
+    } catch (err) {
+      process.stdout.write(`  ! could not edit ${f} (${err instanceof Error ? err.message : String(err)}); left untouched\n`);
+    }
+  }
+  process.exit(0);
+}
+
 if (ARGS.includes("--version") || ARGS.includes("-v")) {
   process.stdout.write(`cempala ${pkgVersion()}\n`);
   process.exit(0);
@@ -117,6 +160,18 @@ function usage(): string {
     "                    (~/.gemini/config/mcp_config.json), preserving any",
     "                    servers already there. Defaults to registering this",
     "                    executable. Used by the installer; safe to re-run.",
+    "",
+    "  cempala --unregister-antigravity",
+    "                    remove only cempala's entry from that file, leaving",
+    "                    every other server and setting untouched.",
+    "",
+    "  cempala --remove-path-block <rc-file>...",
+    "                    strip the PATH export the installer added to a shell",
+    "                    startup file. Only removes a block still carrying the",
+    "                    installer's marker comment.",
+    "",
+    "To uninstall completely, use scripts/uninstall.sh (or uninstall.ps1),",
+    "which also unregisters cempala from Claude Code and Codex.",
     "",
   ].join("\n");
 }

@@ -244,36 +244,157 @@ function registerLocked(
     // cempala, and this stops everyone else.
     writeBackPreservingLinks(path, `${JSON.stringify(next, null, 2)}\n`, text);
   } catch (err) {
-    if (err instanceof ConcurrentModificationError) {
-      return {
-        kind: "manual",
-        path,
-        reason: "the file changed while cempala was updating it, so it was left alone rather than overwritten",
-        snippet,
-      };
-    }
-    if (err instanceof NoBackupError) {
-      return {
-        kind: "manual",
-        path,
-        reason: `could not create a recovery copy first (${err.message}), so the existing config was left untouched rather than risked`,
-        snippet,
-      };
-    }
-    if (err instanceof WriteFailedError) {
-      // The one outcome where the user may have lost something. Naming the
-      // retained backup is the difference between a recoverable situation
-      // and a lost config.
-      return {
-        kind: "manual",
-        path,
-        reason: `the write failed (${err.message}) and the original could not be put back automatically. Your previous config is saved at ${err.backupPath}`,
-        snippet,
-      };
-    }
-    return { kind: "manual", path, reason: `could not write the file (${errMsg(err)})`, snippet };
+    return manualFromWriteError(err, path, snippet);
   }
   return { kind: "updated", path };
+}
+
+/**
+ * Turn a write failure into the `manual` outcome, with a reason that says
+ * what actually happened to the file.
+ *
+ * Shared by registration and removal. They fail in exactly the same ways —
+ * both take the same lock, verify the same way and write through the same
+ * function — so a second copy of this mapping would only be a second thing
+ * to forget to update.
+ */
+function manualFromWriteError(err: unknown, path: string, snippet: string): Extract<RegisterOutcome, { kind: "manual" }> {
+  if (err instanceof ConcurrentModificationError) {
+    return {
+      kind: "manual",
+      path,
+      reason: "the file changed while cempala was updating it, so it was left alone rather than overwritten",
+      snippet,
+    };
+  }
+  if (err instanceof NoBackupError) {
+    return {
+      kind: "manual",
+      path,
+      reason: `could not create a recovery copy first (${err.message}), so the existing config was left untouched rather than risked`,
+      snippet,
+    };
+  }
+  if (err instanceof WriteFailedError) {
+    // The one outcome where the user may have lost something. Naming the
+    // retained backup is the difference between a recoverable situation
+    // and a lost config.
+    return {
+      kind: "manual",
+      path,
+      reason: `the write failed (${err.message}) and the original could not be put back automatically. Your previous config is saved at ${err.backupPath}`,
+      snippet,
+    };
+  }
+  return { kind: "manual", path, reason: `could not write the file (${errMsg(err)})`, snippet };
+}
+
+export type UnregisterOutcome =
+  /** The entry was there and is now gone. */
+  | { kind: "removed"; path: string }
+  /** Nothing to do: no config, or no cempala entry in it. */
+  | { kind: "absent"; path: string }
+  /** We declined to touch the file. `reason` says why. */
+  | { kind: "manual"; path: string; reason: string; snippet: string };
+
+/**
+ * Remove cempala from Antigravity's MCP config — the exact inverse of
+ * `registerWithAntigravity`, and held to the same rule.
+ *
+ * This exists because uninstalling used to be impossible to do properly.
+ * The README promised that deleting `~/.cempala/` was enough, but three
+ * MCP registrations survived it, each pointing at a binary that no longer
+ * existed — so every launch of Claude Code, Codex and Antigravity reported
+ * cempala as a failed server, forever, and the user had to find three
+ * config files to stop it. Adding a fourth registration location without
+ * adding its removal is what made writing this non-optional.
+ *
+ * Removal is narrower than registration, deliberately: it deletes ONE key
+ * and touches nothing else. Not the other servers, not the top-level keys,
+ * not an `mcpServers` object left empty — that empty object is what
+ * Antigravity itself creates on first run, so tidying it away would be us
+ * editing a file we were asked to withdraw from. The file is never
+ * deleted, for the same reason: it is Antigravity's, not ours.
+ */
+export function unregisterFromAntigravity(opts: { configPath?: string } = {}): UnregisterOutcome {
+  const path = opts.configPath ?? ANTIGRAVITY_MCP_CONFIG_PATH;
+  // What to tell the user to do by hand if we decline to act.
+  const snippet = `Remove the "${SERVER_KEY}" entry from "mcpServers" in ${path}`;
+
+  if (!existsSync(path)) return { kind: "absent", path };
+
+  const lock = acquireLock(path);
+  if (!lock) return { kind: "manual", path, reason: lockFailureReason(path), snippet };
+
+  try {
+    let text: string;
+    try {
+      text = readFileSync(path, "utf-8");
+    } catch (err) {
+      return { kind: "manual", path, reason: `could not read the file (${errMsg(err)})`, snippet };
+    }
+    if (!text.trim()) return { kind: "absent", path };
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      // Same refusal as registration: a config we cannot parse is one we
+      // cannot safely rewrite. Removing our entry by text surgery could
+      // corrupt however many others the user has.
+      return {
+        kind: "manual",
+        path,
+        reason: `the existing file is not valid JSON (${errMsg(err)}); it was left untouched`,
+        snippet,
+      };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { kind: "manual", path, reason: "the existing file is valid JSON but not an object; it was left untouched", snippet };
+    }
+
+    const root = parsed as Record<string, unknown>;
+    const servers = asObject(root.mcpServers);
+    if (!servers) {
+      // No `mcpServers`, or it is the wrong shape. Either way there is no
+      // entry of ours to remove, and a wrong-shaped one is not ours to fix.
+      return { kind: "absent", path };
+    }
+    if (!(SERVER_KEY in servers)) return { kind: "absent", path };
+
+    const nextServers = { ...servers };
+    delete nextServers[SERVER_KEY];
+    const next: Record<string, unknown> = { ...root, mcpServers: nextServers };
+
+    try {
+      writeBackPreservingLinks(path, `${JSON.stringify(next, null, 2)}\n`, text);
+    } catch (err) {
+      return manualFromWriteError(err, path, snippet);
+    }
+    return { kind: "removed", path };
+  } finally {
+    lock.release();
+  }
+}
+
+/** Human-readable lines for the uninstaller to print. */
+export function describeUnregisterOutcome(o: UnregisterOutcome): string[] {
+  switch (o.kind) {
+    case "removed":
+      return [`  ✓ removed cempala from ${o.path} (other servers preserved)`];
+    case "absent":
+      return [`  ✓ cempala was not registered in ${o.path}`];
+    case "manual":
+      // The path is printed on its own line rather than left to the
+      // snippet. A message telling someone to go and edit a file has to
+      // name the file, and relying on the snippet to carry it makes that
+      // true only by coincidence.
+      return [
+        `  ! could not remove the registration automatically: ${o.reason}`,
+        `    ${o.snippet}`,
+        `    File: ${o.path}`,
+      ];
+  }
 }
 
 function asObject(v: unknown): Record<string, unknown> | null {
