@@ -8,7 +8,7 @@
 
 **One agent asks. The other just does it.** Same machine, plain language, one turn.
 
-Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code and Codex CLI working together. Ask one for something and it pulls in the other, right there in the same session. No second window, no copy-paste, no cloud.
+Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code, Codex CLI and Antigravity working together. Ask one for something and it pulls in another, right there in the same session. No second window, no copy-paste, no cloud.
 
 <p>
 <a href="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml"><img alt="verify" src="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml/badge.svg" /></a>
@@ -29,19 +29,21 @@ Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claud
 
 ## Why
 
-Claude Code and Codex are both capable, but on your machine neither knows the other exists. Every time you want them to team up, you become the courier. You copy the output from one window, paste it into the other, keep track of who did what, and do it again. Cempala takes you out of the middle.
+Claude Code, Codex and Antigravity are all capable, but on your machine none of them knows the others exist. Every time you want them to team up, you become the courier. You copy the output from one window, paste it into another, keep track of who did what, and do it again. Cempala takes you out of the middle.
 
 Ask in plain language and the handoff happens for you:
 
 > *"Ask Codex to add tests for the file I just changed, then run them."*
 >
 > *"Have Claude write a clear README for this project."*
+>
+> *"Get Antigravity to review this migration and tell me what it would break."*
 
 ## How it works
 
 Cempala gives each agent two complementary ways to hand off work, backed by one shared SQLite notebook (`~/.cempala/cempala.db`) that both read and write:
 
-- **`dispatch` (synchronous).** Shells out to the target agent's headless CLI (`codex exec`, `claude -p`), waits (bounded timeout), and returns the result inline in the same turn. You wait once; both do the work.
+- **`dispatch` (synchronous).** Shells out to the target agent's headless CLI (`codex exec`, `claude -p`, `agy -p`), waits (bounded timeout), and returns the result inline in the same turn. You wait once; both do the work.
 - **Mailbox (asynchronous).** `send_message` / `check_messages` and `create_task` -> `claim_task` -> `complete_task` leave work in a shared queue for the other agent to claim when it's ready. Nothing is lost if a job runs long.
 
 Every `dispatch` also writes a task row, so the synchronous and mailbox paths share one audit log. Because it speaks standard MCP, any compatible agent can join later without server changes.
@@ -58,8 +60,8 @@ Every `dispatch` also writes a task row, so the synchronous and mailbox paths sh
 ## Requirements
 
 - **Bun** is not needed — the installer ships a self-contained binary.
-- **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`) and/or [Codex](https://developers.openai.com/codex/cli) (`codex`). Install both to hand work in either direction.
-- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to `claude` and `codex` and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
+- **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`), [Codex](https://developers.openai.com/codex/cli) (`codex`), and/or [Antigravity](https://antigravity.google/docs/cli) (`agy`). Install more than one to hand work in either direction.
+- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to `claude`, `codex` and `agy` and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
 
 Check before you start:
 
@@ -71,7 +73,11 @@ claude -p "reply with OK"
 codex exec "reply with OK"
 ```
 
-If either prints an authentication error instead of `OK`, sign that CLI in — `claude auth` or `codex login` (`codex login status` shows where you stand) — and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem.
+```sh
+agy -p "reply with OK"
+```
+
+If any of them prints an authentication error instead of `OK`, sign that CLI in — `claude auth`, `codex login` (`codex login status` shows where you stand), or run `agy` once interactively and complete the browser sign-in — and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem. An unauthenticated `agy` is distinctive: it waits 60 seconds for a sign-in that a headless dispatch can never complete, then returns `authentication failed or timed out`.
 
 ## Install
 
@@ -106,6 +112,7 @@ Both installers:
 - add it to `PATH` for the current shell **and** for future shells — on Windows via the user `PATH` variable; on macOS and Linux by writing to the startup file your shell actually reads (see below)
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
+- register with Antigravity by merging an entry into `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json` on Windows), which covers both the Antigravity IDE and the `agy` CLI. Antigravity has no `mcp add` subcommand, so this is a JSON edit rather than a CLI call — it preserves every other server and top-level key already in that file, and if the file can't be parsed it's left untouched and the exact snippet is printed for you to paste. You can re-run just this step with `cempala --register-antigravity`.
 
 On macOS and Linux "the file your shell actually reads" is `~/.zshrc` for zsh. For bash it's *two* files — a login one (`~/.bash_profile`, or whichever of `~/.bash_login` / `~/.profile` you already use) **and** `~/.bashrc` — because bash reads a different file depending on whether the shell is a login shell, and which one your terminal opens varies by platform. Picking one means being wrong for a lot of people. The snippet is guarded, so being read from both adds the directory to `PATH` exactly once.
 
@@ -144,7 +151,49 @@ Every call is logged to `audit_log` with timing, args, and a short result summar
 - **Sandbox scope** is set per agent CLI per dispatch:
   - Codex: `--sandbox workspace-write` (with `-c sandbox_workspace_write.network_access=true` only when `allow_network: true`). Egress is **OS-sandbox-enforced**.
   - Claude: `--tools "<baseline + WebFetch + WebSearch if allow_network>"`, plus `--disallowedTools "WebFetch,WebSearch"` only when `allow_network: false`. The web tools are removed, but Claude's `Bash` can still `curl`, so the dispatch result reports this honestly as `network_enforcement: "tools_only"` rather than the stronger `"sandboxed"` (which only Codex gets).
-- **`--add-dir` is forbidden** for both Codex and Claude. It's the documented escape hatch from the cwd-anchored scope on either CLI, and any `config.toml` that introduces it is rejected at config load time.
+  - Antigravity: `--sandbox --mode accept-edits --add-dir <cwd>`. **`allow_network: false` cannot be enforced here**, and the result says so — see below. Its `--print-timeout` is also raised from agy's 5-minute default to the reaper's 30-minute window: agy is the only one of the three that kills its own run on a clock, and at the default an Antigravity task would stop early while cempala went on tracking it.
+- **`--add-dir` is forbidden in `config.toml`** for every CLI. It's the documented escape hatch from the cwd-anchored scope on all three, and any config that introduces it is rejected at load time. So is `--dangerously-skip-permissions`, which Claude and Antigravity both spell the same way.
+
+  Cempala's own baseline does pass `--add-dir <cwd>` for Antigravity, and that is the opposite of an escape hatch — see below.
+
+### Why Antigravity gets `--add-dir` when config may not
+
+Codex and Claude take their working directory from the process: `spawnDetached({ cwd })` is the single mechanism, and a relative path in a prompt resolves there. **agy does not work that way.** It has a *workspace* concept separate from the process cwd, and with no workspace set it falls back to its own scratch directory.
+
+Measured against agy 1.1.12: a dispatch with `cwd: <project>` asking for `./out.txt` wrote to `~/.gemini/antigravity-cli/scratch/out.txt`. The work silently landed somewhere the caller never looks, and the cwd-anchored scope — which cempala had validated the cwd for — simply did not apply to that agent.
+
+So the baseline passes `--add-dir <the validated cwd>`. The flag stays forbidden in `config.toml`, and there is no contradiction between the two: the forbidden list is applied to *config-supplied* argv, where `--add-dir /` would **widen** scope past the validated cwd. In the baseline the argument **is** the validated cwd, so it **narrows** agy from "my scratch dir, wherever that is" down to exactly the directory cempala checked against the trust boundary and the denylist. Forbidden from config, required in the baseline, for one reason: the cwd is cempala's to set and nobody else's to change.
+
+### What `allow_network` actually buys you, per agent
+
+Every `dispatch` result carries a `network_enforcement` field. It describes what was *applied*, not what was *asked for*:
+
+| Agent | `allow_network: false` | `allow_network: true` |
+|---|---|---|
+| `codex` | `"sandboxed"` — OS sandbox blocks egress | `"allowed"` |
+| `claude` | `"tools_only"` — web tools removed, but `Bash` can still `curl` | `"allowed"` |
+| `antigravity` | `"not_enforceable"` — **the request could not be applied** | `"allowed"` |
+
+Antigravity gets a fourth label because `agy` exposes no argv-level network switch: it has no counterpart to Codex's `network_access` config key or Claude's `--tools` / `--disallowedTools`. Its network reach is governed by the `read_url` and `execute_url` permissions in *your own* agy settings, which Cempala neither reads nor writes. `--sandbox` is still applied — it confines the commands the agent *runs* (`sandbox-exec` on macOS, `nsjail` on Linux, AppContainer on Windows) — but that isn't a guarantee about the agent's own reach, so it doesn't earn the `"sandboxed"` label.
+
+The dispatch still runs. Reporting `"sandboxed"` here would be the one failure this label set exists to prevent: a caller reading a guarantee that nothing in the command line backs up. If an Antigravity dispatch must be offline, set it in agy's own permissions.
+
+### Antigravity and shell commands
+
+`--mode accept-edits` lets agy read and write files in the dispatch cwd, the same way `--permission-mode acceptEdits` does for Claude. **Shell commands are a different matter.** In headless mode agy auto-denies any tool needing a permission it cannot prompt for, and it does so quietly: the run exits `0`, reports `status: "SUCCESS"`, returns an empty answer, and writes the only explanation to stderr.
+
+Cempala surfaces that explanation rather than handing you an empty result — a run with nothing to say has its stderr read and returned, exactly as a failed run does:
+
+```
+status: "completed", exit_code: 0
+result:  jetski: no output produced — a tool required the "command" permission
+         that headless mode cannot prompt for, so it was auto-denied. Add an
+         allow-rule under permissions.allow in settings.json …
+```
+
+The status stays `completed` because that is what the agent reported, and a prompt whose whole effect is a file edit can legitimately return no prose. Cempala relays verdicts; it doesn't invent them.
+
+If you want Antigravity dispatches to run shell commands, add an allow-rule under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. Cempala will **not** pass `--dangerously-skip-permissions` to get around this — it's on the FR-14 forbidden list, and a `config.toml` that tries to add it is rejected at load time. Which tool agy reaches for isn't always predictable, so a prompt phrased toward file edits ("create the file at …") tends to work where one phrased toward the shell ("run a command to …") gets denied.
 
 ## Configuration
 
@@ -174,9 +223,16 @@ sandbox_args = ["--sandbox", "workspace-write"]
 [agents.claude]
 exec_command = ["claude", "-p"]
 permission_args = ["--permission-mode", "acceptEdits"]
+
+[agents.antigravity]
+exec_command = ["agy", "-p"]
+sandbox_args = ["--sandbox"]
+permission_args = ["--mode", "accept-edits"]
 ```
 
 All paths may use `~/`; `config.ts` expands them against `os.homedir()` on read. The file's denylist arrays are starting points. The compile-time baseline is unioned on top and cannot be weakened by trimming.
+
+The agent id is `antigravity` even though the binary is `agy` — that's the name you pass as `target_agent`, and the binary name stays where it belongs, in `exec_command`.
 
 ## Development
 
@@ -184,7 +240,7 @@ All paths may use `~/`; `config.ts` expands them against `os.homedir()` on read.
 bun install
 bun run src/index.ts        # run the server (for manual testing)
 bun test                    # unit tests
-CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude
+CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude + agy
 bash scripts/test-install.sh                      # installer tests
 bun x tsc --noEmit          # typecheck
 bun build --compile src/index.ts --outfile dist/cempala.exe
@@ -218,7 +274,8 @@ It drives the real `install.sh` against a stubbed `curl` and stub agent CLIs in 
 
 ## Architecture
 
-- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--version`, `--help`; otherwise starts the stdio MCP server.
+- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--register-antigravity`, `--version`, `--help`; otherwise starts the stdio MCP server.
+- `src/register-antigravity.ts`: the `mcp_config.json` merge. Lives in the binary rather than in the two installers, because a correct JSON merge in bash means depending on `jq` or `python3`, and writing it twice — once in bash, once in PowerShell — is two implementations of one rule.
 - `src/db/`: raw SQL schema + `bun:sqlite` client. No ORM.
 - `src/security/`: the ONLY path comparator (`paths.ts`), the ONLY trust-boundary decider (`trust-boundary.ts`), the ONLY denylist compiler (`denylist.ts`). Tool handlers consume these; they never re-derive.
 - `src/platform/`: `paths.ts` for OS-correct filesystem locations, `spawn.ts` for the cross-platform detached spawn + PID liveness wrapper.
@@ -232,7 +289,7 @@ In Indonesian *wayang* theatre, the **cempala** is the small wooden mallet the p
 
 ## Disclaimer
 
-Cempala is an independent project by theLabs. It is not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are products of Anthropic; Codex and Codex CLI are products of OpenAI. Those names and trademarks belong to their respective owners, and are used here only to describe the tools Cempala works with.
+Cempala is an independent project by theLabs. It is not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI or Google. Claude and Claude Code are products of Anthropic; Codex and Codex CLI are products of OpenAI; Antigravity is a product of Google. Those names and trademarks belong to their respective owners, and are used here only to describe the tools Cempala works with.
 
 ## License
 

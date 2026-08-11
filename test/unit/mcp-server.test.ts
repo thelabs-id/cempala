@@ -140,6 +140,34 @@ describe("MCP server (end-to-end via stdio)", () => {
     } finally { s.close(); }
   });
 
+  test("the dispatch tool advertises every dispatchable agent", async () => {
+    // The enum is what a calling agent reads to decide what it may ask
+    // for. An agent cempala can spawn but does not advertise is one no
+    // caller will ever choose; one it advertises but cannot spawn fails
+    // at the end of a caller's turn. Both come from the enum and the
+    // validator drifting apart, so this asserts the wire-visible half.
+    const s = await startServer();
+    try {
+      await s.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test-client", version: "0.1.0" },
+        },
+      });
+      await s.readOne();
+      await s.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+      const r = await s.readOne();
+      const tools = (r?.result as { tools?: { name: string; inputSchema?: any }[] })?.tools ?? [];
+      const dispatchTool = tools.find((t) => t.name === "dispatch");
+      const targets: string[] = dispatchTool?.inputSchema?.properties?.target_agent?.enum ?? [];
+      expect([...targets].sort()).toEqual(["antigravity", "claude", "codex"]);
+    } finally { s.close(); }
+  });
+
   test("send_message is callable and returns ok=true", async () => {
     const s = await startServer();
     try {

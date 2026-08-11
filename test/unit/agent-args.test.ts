@@ -10,9 +10,13 @@
 
 import { describe, test, expect } from "bun:test";
 import { DEFAULT_CONFIG, type AppConfig } from "../../src/config.ts";
-import { resolveCodexArgv, resolveClaudeArgv, findForbiddenFlag, assertArgvSafe } from "../../src/tools/agent-args.ts";
+import { ACTIVITY_GRACE_MS } from "../../src/tools/task-liveness.ts";
+import { resolveCodexArgv, resolveClaudeArgv, resolveAntigravityArgv, resolveAgentArgv, findForbiddenFlag, assertArgvSafe } from "../../src/tools/agent-args.ts";
 
 const CFG: AppConfig = { ...DEFAULT_CONFIG, source: "<test>" };
+
+/** A validated, absolute cwd — what dispatch passes the resolver. */
+const CWD = "/home/someone/project";
 
 describe("resolveCodexArgv (AC-13)", () => {
   test("allow_network=false → no -c network_access, network_enforcement=sandboxed", () => {
@@ -158,6 +162,124 @@ describe("resolveClaudeArgv (AC-13)", () => {
   });
 });
 
+describe("resolveAntigravityArgv (AC-13)", () => {
+  test("allow_network=false → network_enforcement=not_enforceable, never a label it cannot back up", () => {
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    // The whole point of the fourth label. agy has no argv-level network
+    // switch, so claiming any of the other three here would tell a caller
+    // a guarantee holds when nothing in the argv enforces it.
+    expect(r.network_enforcement).toBe("not_enforceable");
+    expect(r.network_enforcement).not.toBe("sandboxed");
+    expect(r.network_enforcement).not.toBe("tools_only");
+    expect(r.network_enforcement).not.toBe("allowed");
+  });
+
+  test("allow_network=true → network_enforcement=allowed", () => {
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, true);
+    expect(r.network_enforcement).toBe("allowed");
+  });
+
+  test("the argv is identical either way — the label is the only thing that moves", () => {
+    // Pinning this down because it looks like a bug and is not: there is
+    // no flag to add or remove. If agy ever grows one, this test failing
+    // is the reminder to make `allow_network` mean something here.
+    expect(resolveAntigravityArgv(CFG, "do thing", CWD, false).argv)
+      .toEqual(resolveAntigravityArgv(CFG, "do thing", CWD, true).argv);
+  });
+
+  test("the FR-14 baseline is always applied: --sandbox, --mode accept-edits, JSON output", () => {
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    expect(r.argv).toContain("--sandbox");
+    const modeIdx = r.argv.indexOf("--mode");
+    expect(modeIdx).toBeGreaterThanOrEqual(0);
+    expect(r.argv[modeIdx + 1]).toBe("accept-edits");
+    const fmtIdx = r.argv.indexOf("--output-format");
+    expect(fmtIdx).toBeGreaterThanOrEqual(0);
+    expect(r.argv[fmtIdx + 1]).toBe("json");
+  });
+
+  test("agy's own print-timeout is raised to the reaper's window", () => {
+    // agy is the only CLI of the three that kills its own run on a clock.
+    // At the 5-minute default it would stop while cempala went on tracking
+    // the task for thirty — a truncation with no cause visible anywhere in
+    // cempala's own settings.
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    const idx = r.argv.indexOf("--print-timeout");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(r.argv[idx + 1]).toBe(`${Math.floor(ACTIVITY_GRACE_MS / 1000)}s`);
+  });
+
+  test("the prompt is the value of -p, not a trailing argument", () => {
+    // Same layout constraint claude has: agy takes the prompt as the
+    // flag's value, and a prompt drifted to the end of the argv is a
+    // silently different command line.
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    expect(r.argv[0]).toBe("agy");
+    expect(r.argv[1]).toBe("-p");
+    expect(r.argv[2]).toBe("do thing");
+  });
+
+  test("argv is an array — never a shell string (FR-14 / NFR-6)", () => {
+    expect(Array.isArray(resolveAntigravityArgv(CFG, "do thing", CWD, false).argv)).toBe(true);
+  });
+
+  test("resolveAgentArgv routes 'antigravity' here rather than falling through to claude", () => {
+    // The router's final branch is an unguarded `return resolveClaudeArgv`,
+    // so a missing case does not fail loudly — it silently spawns the
+    // wrong CLI with claude's flags.
+    const viaRouter = resolveAgentArgv(CFG, "antigravity", "do thing", CWD, false);
+    expect(viaRouter.argv).toEqual(resolveAntigravityArgv(CFG, "do thing", CWD, false).argv);
+    expect(viaRouter.argv).not.toContain("--permission-mode");
+    expect(viaRouter.argv).not.toContain("--tools");
+  });
+
+  test("allowed_tools is accepted and ignored — it must not narrow the reported enforcement", () => {
+    const r = resolveAgentArgv(CFG, "antigravity", "do thing", CWD, false, ["Read"]);
+    expect(r.argv).not.toContain("--tools");
+    expect(r.network_enforcement).toBe("not_enforceable");
+  });
+
+  test("the cwd is passed as --add-dir, anchoring agy to the validated directory", () => {
+    // Without this, agy ignores the process cwd entirely and resolves
+    // relative paths against ~/.gemini/antigravity-cli/scratch. Measured
+    // against agy 1.1.12: a dispatch with cwd=<project> asking for
+    // `./out.txt` wrote to the scratch dir, so the work landed somewhere
+    // the caller never looks and FR-14's cwd-anchored scope did not hold.
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    const idx = r.argv.indexOf("--add-dir");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(r.argv[idx + 1]).toBe(CWD);
+  });
+
+  test("--add-dir names EXACTLY the validated cwd and nothing else", () => {
+    // The flag is forbidden in config because it widens scope. In the
+    // baseline it must only ever narrow — one occurrence, one directory,
+    // the one cempala checked against the trust boundary.
+    const r = resolveAntigravityArgv(CFG, "do thing", CWD, false);
+    expect(r.argv.filter((a) => a === "--add-dir")).toHaveLength(1);
+    const dirs = r.argv.filter((_, i) => r.argv[i - 1] === "--add-dir");
+    expect(dirs).toEqual([CWD]);
+  });
+
+  test("a relative or empty cwd is rejected rather than silently mis-anchored", () => {
+    // A relative --add-dir would be resolved by agy against whatever it
+    // considers its own cwd, reintroducing the very ambiguity the flag is
+    // there to remove. Failing loudly beats writing to the wrong place.
+    expect(() => resolveAntigravityArgv(CFG, "do thing", "project", false)).toThrow(/absolute cwd/i);
+    expect(() => resolveAntigravityArgv(CFG, "do thing", "", false)).toThrow(/absolute cwd/i);
+    expect(() => resolveAntigravityArgv(CFG, "do thing", "./x", false)).toThrow(/absolute cwd/i);
+  });
+
+  test("codex and claude are unaffected by the cwd argument", () => {
+    // They take their working directory from the process, via
+    // spawnDetached({ cwd }) — the single mechanism. Only agy needs the
+    // argv to say so, and adding it to the others would be a second
+    // mechanism for the same thing.
+    expect(resolveAgentArgv(CFG, "codex", "x", CWD, false).argv).not.toContain("--add-dir");
+    expect(resolveAgentArgv(CFG, "claude", "x", CWD, false).argv).not.toContain("--add-dir");
+  });
+});
+
 describe("findForbiddenFlag / assertArgvSafe (FR-14 config passthrough)", () => {
   test("codex --sandbox danger-full-access is forbidden", () => {
     expect(findForbiddenFlag(["--sandbox", "danger-full-access"], "codex")).toBe("danger-full-access");
@@ -186,6 +308,39 @@ describe("findForbiddenFlag / assertArgvSafe (FR-14 config passthrough)", () => 
     // We check substring, so the test asserts the matcher catches it via
     // the dangerous fragment, not via a perfect flag-name match.
     expect(findForbiddenFlag(["--allow-dangerously-skip-permissions"], "claude")).toBe("dangerously-skip-permissions");
+  });
+
+  test("antigravity --dangerously-skip-permissions is forbidden", () => {
+    // agy spells this flag exactly as claude does ("Auto-approve all tool
+    // permission requests without prompting"). The needle is `cli: "any"`
+    // precisely so adding an agent cannot quietly leave it uncovered.
+    expect(findForbiddenFlag(["--dangerously-skip-permissions"], "antigravity")).toBe("dangerously-skip-permissions");
+    expect(() => assertArgvSafe(
+      ["agy", "-p", "--dangerously-skip-permissions"],
+      "antigravity",
+      "agents.antigravity.exec_command",
+    )).toThrow(/forbidden flag/i);
+  });
+
+  test("antigravity --add-dir is forbidden (FR-14 cwd-anchored scope)", () => {
+    expect(findForbiddenFlag(["agy", "-p", "--add-dir", "/"], "antigravity")).toBe("--add-dir");
+  });
+
+  test("safe antigravity args are not flagged", () => {
+    expect(findForbiddenFlag(
+      ["agy", "-p", "--sandbox", "--mode", "accept-edits", "--output-format", "json"],
+      "antigravity",
+    )).toBeNull();
+  });
+
+  test("the default antigravity config is itself safe", () => {
+    // A default that would be rejected on load is a config nobody can
+    // start from. Cheap to assert, and it catches a baseline edited into
+    // conflict with the forbidden table.
+    const a = DEFAULT_CONFIG.agents.antigravity;
+    expect(() => assertArgvSafe(a.exec_command, "antigravity", "[default]")).not.toThrow();
+    expect(() => assertArgvSafe(a.sandbox_args ?? [], "antigravity", "[default]")).not.toThrow();
+    expect(() => assertArgvSafe(a.permission_args ?? [], "antigravity", "[default]")).not.toThrow();
   });
 
   test("safe codex args are not flagged", () => {

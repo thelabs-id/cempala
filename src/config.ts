@@ -13,7 +13,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, DEFAULT_OUTPUT_DIR, expandHome, ensureAbsolute } from "./platform/paths.ts";
-import { assertArgvSafe } from "./tools/agent-args.ts";
+import { assertArgvSafe, type AgentId } from "./tools/agent-args.ts";
 
 export interface ServerConfig {
   db_path: string;
@@ -45,6 +45,7 @@ export interface AppConfig {
   agents: {
     codex: AgentConfig;
     claude: AgentConfig;
+    antigravity: AgentConfig;
   };
   /** Where the config was actually loaded from (for diagnostics). */
   source: string;
@@ -75,6 +76,14 @@ const DEFAULTS: AppConfig = {
     claude: {
       exec_command: ["claude", "-p"],
       permission_args: ["--permission-mode", "acceptEdits"],
+    },
+    antigravity: {
+      // `agy` is the Antigravity CLI's binary name; the agent id stays
+      // `antigravity` because that is the product users know it by, and
+      // an id is much harder to change later than a config value.
+      exec_command: ["agy", "-p"],
+      sandbox_args: ["--sandbox"],
+      permission_args: ["--mode", "accept-edits"],
     },
   },
   source: "<defaults>",
@@ -132,35 +141,35 @@ function mergeConfig(base: AppConfig, raw: Record<string, unknown>): AppConfig {
   }
   if (raw.agents && typeof raw.agents === "object") {
     const a = raw.agents as Record<string, unknown>;
-    if (a.codex && typeof a.codex === "object") {
-      const c = a.codex as Record<string, unknown>;
-      if (Array.isArray(c.exec_command)) {
-        const ec = c.exec_command.filter((x): x is string => typeof x === "string");
-        assertArgvSafe(ec, "codex", "agents.codex.exec_command");
-        out.agents.codex.exec_command = ec;
-      }
-      if (Array.isArray(c.sandbox_args)) {
-        const sa = c.sandbox_args.filter((x): x is string => typeof x === "string");
-        assertArgvSafe(sa, "codex", "agents.codex.sandbox_args");
-        out.agents.codex.sandbox_args = sa;
-      }
-    }
-    if (a.claude && typeof a.claude === "object") {
-      const c = a.claude as Record<string, unknown>;
-      if (Array.isArray(c.exec_command)) {
-        const ec = c.exec_command.filter((x): x is string => typeof x === "string");
-        assertArgvSafe(ec, "claude", "agents.claude.exec_command");
-        out.agents.claude.exec_command = ec;
-      }
-      if (Array.isArray(c.permission_args)) {
-        const pa = c.permission_args.filter((x): x is string => typeof x === "string");
-        assertArgvSafe(pa, "claude", "agents.claude.permission_args");
-        out.agents.claude.permission_args = pa;
+    // One loop over the agent ids rather than a hand-written block each.
+    // The blocks used to be per-agent copies, and they had already drifted:
+    // codex validated `sandbox_args` but ignored `permission_args`, claude
+    // did the reverse, so a forbidden flag parked in the key its agent's
+    // block did not read reached the config unchecked. Every agent now gets
+    // the same three checks, and adding a fourth agent cannot reintroduce
+    // the asymmetry.
+    for (const id of AGENT_IDS) {
+      const c = a[id];
+      if (!c || typeof c !== "object") continue;
+      const raw_agent = c as Record<string, unknown>;
+      for (const key of ["exec_command", "sandbox_args", "permission_args"] as const) {
+        const v = raw_agent[key];
+        if (!Array.isArray(v)) continue;
+        const list = v.filter((x): x is string => typeof x === "string");
+        assertArgvSafe(list, id, `agents.${id}.${key}`);
+        out.agents[id][key] = list;
       }
     }
   }
   return out;
 }
+
+/**
+ * The agents cempala ships wired up. Exported so the tool schema, the DB
+ * seed and the dispatch validator all read the same list instead of each
+ * keeping its own copy to fall out of date.
+ */
+export const AGENT_IDS = ["codex", "claude", "antigravity"] as const satisfies readonly AgentId[];
 
 /**
  * The default config.toml that `cempala --init` writes. Deliberately omits
@@ -223,6 +232,17 @@ sandbox_args = ["--sandbox", "workspace-write"]
 [agents.claude]
 exec_command = ["claude", "-p"]
 permission_args = ["--permission-mode", "acceptEdits"]
+
+# Antigravity CLI. \`agy\` is the binary; \`antigravity\` is the agent id you
+# use in \`dispatch\`. Note that a dispatch to this agent CANNOT enforce
+# \`allow_network = false\`: agy has no argv-level network switch, so the
+# result reports \`network_enforcement: "not_enforceable"\` rather than
+# claiming a guarantee. Restrict its network reach in agy's own settings
+# (the \`read_url\` / \`execute_url\` permissions) if that matters to you.
+[agents.antigravity]
+exec_command = ["agy", "-p"]
+sandbox_args = ["--sandbox"]
+permission_args = ["--mode", "accept-edits"]
 `;
 
 /**

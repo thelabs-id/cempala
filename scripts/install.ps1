@@ -12,7 +12,9 @@
 #      persistence across future sessions.
 #   5. Run cempala --init to write the default config if absent.
 #   6. Detect claude / codex, run matching mcp add for each; print the
-#      manual command for each not found.
+#      manual command for each not found. Antigravity has no `mcp add`, so
+#      `cempala --register-antigravity` merges the entry into
+#      %USERPROFILE%\.gemini\config\mcp_config.json instead.
 
 $ErrorActionPreference = "Stop"
 
@@ -262,13 +264,32 @@ try {
   Register-Agent -Name "codex"  -AddArgs @("mcp", "add", "cempala", "--", $dest) `
                                 -RemoveArgs @("mcp", "remove", "cempala")
 
+  # Antigravity has no `mcp add` subcommand -- `agy --help` lists agent,
+  # changelog, help, install, models, plugin and update, and the docs say to
+  # edit %USERPROFILE%\.gemini\config\mcp_config.json directly. cempala does
+  # that merge itself so this script and install.sh do not each carry their
+  # own copy of the rule; it preserves any servers already registered and
+  # refuses to touch a config it cannot parse.
+  #
+  # Run unconditionally rather than only when `agy` is on PATH: the same file
+  # is read by the Antigravity IDE, which many people install without the CLI.
+  Write-Host "-> registering cempala with Antigravity"
+  $agResult = Invoke-Cli -Exe $dest -CliArgs @("--register-antigravity", $dest)
+  if ($agResult.Output) { Write-Host $agResult.Output }
+  if ($agResult.ExitCode -ne 0) {
+    Write-Host "  ! antigravity registration step failed; cempala is otherwise installed"
+  }
+
   Write-Host ""
   Write-Host "[ok] cempala installed."
   Write-Host ""
   Write-Host "Next steps:"
-  Write-Host "  - RESTART any Claude Code or Codex session that is already open, so it"
-  Write-Host "    picks up the registration. Until you do, it will show cempala as failed."
-  Write-Host "  - Then run '<cli> mcp list' to confirm cempala is connected."
+  Write-Host "  - RESTART any Claude Code, Codex or Antigravity session that is already"
+  Write-Host "    open, so it picks up the registration. Until you do, it will show"
+  Write-Host "    cempala as failed."
+  Write-Host "  - Then run '<cli> mcp list' to confirm cempala is connected (in"
+  Write-Host "    Antigravity, type '/mcp' in the prompt, or check Settings ->"
+  Write-Host "    Installed MCP Servers)."
   Write-Host "  - From any project under your home directory, dispatch or message the other agent."
   Write-Host "  - For paths outside your home, call approve_path after the human confirms."
   Write-Host ""

@@ -158,6 +158,18 @@ digest_of() {
 make_asset() {
   if [ -n "$asset_src" ]; then
     cp "$asset_src" "$1"
+  elif [ "$cempala_mode" = "ag_fail" ]; then
+    # A cempala whose --register-antigravity step fails. Antigravity has no
+    # `mcp add`, so that step is a call back into this very binary; if a
+    # failure there aborted the run, a bad JSON config in the user's home
+    # would take down an install that had otherwise fully succeeded.
+    {
+      printf '%s\n' '#!/bin/sh'
+      printf '%s\n' 'case "$1" in'
+      printf '%s\n' '  --register-antigravity) echo "boom" >&2; exit 1 ;;'
+      printf '%s\n' "esac"
+      printf '%s\n' "echo \"cempala stub ${payload}: \$*\""
+    } > "$1"
   else
     printf '%s\n' '#!/bin/sh' "echo \"cempala stub ${payload}: \$*\"" > "$1"
   fi
@@ -303,6 +315,7 @@ begin_case() {
   have_codex=1
   claude_mode="ok"
   codex_mode="ok"
+  cempala_mode="ok"
 }
 
 teardown() { rm -rf "$work"; }
@@ -328,6 +341,31 @@ run_all_cases() {
   assert_eq "codex argv (no --scope)" \
     "$(cat "$work/log/codex")" \
     "[mcp][add][cempala][--][${home_dir:-$work/home}/.cempala/bin/cempala]"
+  teardown
+
+  # 1b. Antigravity has no `mcp add`, so it is registered by calling back
+  #     into cempala itself. The absolute path matters for the same reason
+  #     it does for claude/codex: a client whose PATH predates the install
+  #     cannot resolve the bare name.
+  begin_case "antigravity is registered via cempala --register-antigravity"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "the step ran" "$out" "registering cempala with Antigravity"
+  assert_contains "with the absolute binary path" "$out" \
+    "--register-antigravity ${home_dir:-$work/home}/.cempala/bin/cempala"
+  assert_contains "closing banner printed" "$out" "✓ cempala installed."
+  teardown
+
+  # 1c. That step touches a file cempala does not own, so it is the step
+  #     most likely to decline. Declining must not fail the install.
+  begin_case "antigravity registration fails — install still succeeds"
+  cempala_mode="ag_fail"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "the failure is reported" "$out" "antigravity registration step failed"
+  assert_contains "and the install still completes" "$out" "✓ cempala installed."
   teardown
 
   # 2. Neither CLI installed: manual hints, still a success.

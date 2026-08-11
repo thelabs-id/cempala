@@ -11,7 +11,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { loadConfig, initConfigIfMissing, type AppConfig } from "./config.ts";
+import { loadConfig, initConfigIfMissing, AGENT_IDS, type AppConfig } from "./config.ts";
 import { openDatabase, type DB } from "./db/client.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -40,6 +40,30 @@ if (ARGS.includes("--init")) {
   process.exit(0);
 }
 
+// `--register-antigravity [path-to-binary]` — used by the installers.
+//
+// Claude and Codex are registered by shelling out to their own `mcp add`;
+// Antigravity has no such subcommand, so the JSON merge lives here instead
+// of being written twice, in bash and in PowerShell, against a jq that may
+// not be installed. See src/register-antigravity.ts.
+if (ARGS.includes("--register-antigravity")) {
+  const { registerWithAntigravity, describeOutcome } = await import("./register-antigravity.ts");
+  const flagIdx = ARGS.indexOf("--register-antigravity");
+  const next = ARGS[flagIdx + 1];
+  // Default to this executable's own path. process.execPath is the
+  // compiled binary itself, which is exactly what a client needs to
+  // launch — and registering an absolute path rather than the bare name
+  // `cempala` is what makes the registration work in an editor whose
+  // PATH predates the install (the same reasoning as install.sh).
+  const binaryPath = next && !next.startsWith("-") ? next : process.execPath;
+  const outcome = registerWithAntigravity({ binaryPath });
+  process.stdout.write(`${describeOutcome(outcome).join("\n")}\n`);
+  // Exit 0 even for `manual`: a config we declined to rewrite is a
+  // situation the user must resolve, not a failed install, and failing
+  // here would abort an installer that has otherwise fully succeeded.
+  process.exit(0);
+}
+
 if (ARGS.includes("--version") || ARGS.includes("-v")) {
   process.stdout.write(`cempala ${pkgVersion()}\n`);
   process.exit(0);
@@ -65,6 +89,12 @@ function usage(): string {
     "  cempala --init    write a default config if absent",
     "  cempala --version print version and exit",
     "  cempala --help    print this message",
+    "",
+    "  cempala --register-antigravity [binary-path]",
+    "                    add cempala to Antigravity's global MCP config",
+    "                    (~/.gemini/config/mcp_config.json), preserving any",
+    "                    servers already there. Defaults to registering this",
+    "                    executable. Used by the installer; safe to re-run.",
     "",
   ].join("\n");
 }
@@ -143,12 +173,14 @@ const TOOL_DEFS = [
   tool("dispatch", "Synchronously run a prompt in the target agent; returns the result or a 'running' status if it times out.", {
     type: "object",
     properties: {
-      target_agent: { type: "string", enum: ["codex", "claude"] },
+      // Read from AGENT_IDS so the advertised enum and the validator in
+      // dispatch.ts cannot disagree about what is dispatchable.
+      target_agent: { type: "string", enum: [...AGENT_IDS] },
       prompt: { type: "string" },
       cwd: { type: "string" },
       wait_seconds: { type: ["number", "null"], description: "Max wait time; capped at 600 (config.dispatch.max_wait_seconds)" },
-      allowed_tools: { type: ["array", "null"], items: { type: "string" } },
-      allow_network: { type: ["boolean", "null"] },
+      allowed_tools: { type: ["array", "null"], items: { type: "string" }, description: "Narrows Claude's built-in tools by intersection. No-op for codex and antigravity, which have no argv-level tool allowlist." },
+      allow_network: { type: ["boolean", "null"], description: "Whether the spawned agent may reach the network. The result's network_enforcement says what was actually applied; for antigravity a false value reports 'not_enforceable', because agy exposes no argv-level network switch." },
       created_by: { type: ["string", "null"] },
     },
     required: ["target_agent", "prompt", "cwd"],

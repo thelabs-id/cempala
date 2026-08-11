@@ -25,10 +25,33 @@
 //     "the user can weaken the trust boundary via a TOML edit" becomes
 //     true — and that's not the threat model we want.
 
+import { isAbsolute } from "node:path";
 import type { AppConfig, AgentConfig } from "../config.ts";
+import { ACTIVITY_GRACE_MS } from "./task-liveness.ts";
 
-/** Network enforcement label (FR-13). Three states. */
-export type NetworkEnforcement = "sandboxed" | "tools_only" | "allowed";
+/** The agent CLIs cempala knows how to spawn. */
+export type AgentId = "codex" | "claude" | "antigravity";
+
+/**
+ * Network enforcement label (FR-13).
+ *
+ * The first three describe a restriction we actually imposed on the child:
+ * codex is sandboxed, claude has the web tools taken away, or the caller
+ * asked for network and got it.
+ *
+ * `not_enforceable` is the fourth, and it is an admission rather than a
+ * restriction. The Antigravity CLI exposes no argv-level control over
+ * network access — its `read_url` / `execute_url` permissions live in the
+ * user's own agy settings, which cempala neither reads nor writes, and
+ * `--sandbox` confines the commands the agent RUNS rather than the agent's
+ * own reach. So a dispatch with `allow_network: false` still runs, and the
+ * result says plainly that the request could not be enforced.
+ *
+ * Reporting one of the other three there would be the one failure this
+ * label set exists to prevent: a caller reading "sandboxed" and believing
+ * a guarantee that nothing in the argv backs up.
+ */
+export type NetworkEnforcement = "sandboxed" | "tools_only" | "allowed" | "not_enforceable";
 
 /**
  * FR-14 baseline: the built-in tools that the spawned Claude session has
@@ -64,24 +87,28 @@ const WEB_TOOLS = ["WebFetch", "WebSearch"] as const;
  * letting a config add Claude cwd-widening without config-load
  * rejection.
  */
-const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: "codex" | "claude" | "any"; needle: string }> = [
+const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: AgentId | "any"; needle: string }> = [
   // Codex (FR-14 table)
   { cli: "codex", needle: "danger-full-access" },
   { cli: "codex", needle: "dangerously-bypass-approvals-and-sandbox" },
   { cli: "codex", needle: "dangerously-bypass-hook-trust" },
   // Codex network-enable config key (FR-13)
   { cli: "codex", needle: "network_access=true" },
-  // Sandbox-widening (FR-14 cwd-anchored scope) — applies to BOTH CLIs.
-  // `cli: "any"` is correct: the documented `claude --help` shows
-  // `--add-dir <directories...>` and codex has the same flag with the
-  // same purpose. Banning it on one but not the other would let a
-  // single agent bypass the cwd scope.
+  // Sandbox-widening (FR-14 cwd-anchored scope) — applies to EVERY CLI.
+  // `cli: "any"` is correct: `claude --help`, `codex --help` and
+  // `agy --help` all document `--add-dir` with the same purpose, so
+  // banning it on some but not others would let one agent bypass the
+  // cwd scope the other two are held to.
   { cli: "any", needle: "--add-dir" },
-  // Claude (FR-14 table). Each forbidden flag has its own needle; we
-  // also include a "dangerously-skip-permissions" fragment so
-  // `--allow-dangerously-skip-permissions` is caught (the flag name
-  // contains the same trailing substring, just with a `allow-` prefix).
-  { cli: "claude", needle: "dangerously-skip-permissions" },
+  // Approval-bypass. Claude spells it `--dangerously-skip-permissions`
+  // and Antigravity spells it identically (`agy --help`:
+  // "Auto-approve all tool permission requests without prompting"), so
+  // this is `any` rather than one entry per CLI — a needle that has to
+  // be repeated for each new agent is a needle someone will forget to
+  // repeat. The substring also catches Claude's
+  // `--allow-dangerously-skip-permissions`, which differs only by
+  // prefix.
+  { cli: "any", needle: "dangerously-skip-permissions" },
   { cli: "claude", needle: "bypassPermissions" },
 ];
 
@@ -92,7 +119,7 @@ const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: "codex" | "claude" | "any"; needle
  * defaults). Substring match is intentional — `--sandbox=danger-full-access`
  * is a real attack vector and whole-word equality would let it through.
  */
-export function findForbiddenFlag(argv: readonly string[], cli: "codex" | "claude"): string | null {
+export function findForbiddenFlag(argv: readonly string[], cli: AgentId): string | null {
   for (const entry of FORBIDDEN_FLAG_SUBSTRINGS) {
     if (entry.cli !== "any" && entry.cli !== cli) continue;
     for (const arg of argv) {
@@ -107,7 +134,7 @@ export function findForbiddenFlag(argv: readonly string[], cli: "codex" | "claud
  * Validate a config-supplied argv list. Throws on a forbidden flag; the
  * caller is expected to bubble this up to a config-load error.
  */
-export function assertArgvSafe(argv: readonly string[], cli: "codex" | "claude", source: string): void {
+export function assertArgvSafe(argv: readonly string[], cli: AgentId, source: string): void {
   const hit = findForbiddenFlag(argv, cli);
   if (hit) {
     throw new Error(
@@ -272,19 +299,148 @@ export function resolveClaudeArgv(
 }
 
 /**
+ * Resolve the argv to spawn an Antigravity CLI (`agy`) invocation.
+ *
+ *   allow_network=false → --sandbox                (network NOT enforced)
+ *   allow_network=true  → --sandbox                (identical argv)
+ *
+ * The two cases producing the same argv is the honest outcome, not an
+ * oversight. `agy --help` offers no counterpart to codex's
+ * `sandbox_workspace_write.network_access` or to claude's `--tools` /
+ * `--disallowedTools`: network reach is governed by the `read_url` and
+ * `execute_url` permissions in the user's own agy settings, which cempala
+ * does not touch. So `allow_network: false` cannot be enforced from here,
+ * and the resolver says exactly that via `not_enforceable` rather than
+ * borrowing a label whose guarantee it cannot keep.
+ *
+ * `--sandbox` is applied unconditionally, as the FR-14 narrowest-scope
+ * baseline for this agent. It is the nearest analogue to codex's
+ * `--sandbox workspace-write`: it confines the commands the agent runs
+ * (sandbox-exec on macOS, nsjail on Linux, AppContainer on Windows). It is
+ * NOT a network guarantee for the agent itself, which is precisely why it
+ * does not earn the `sandboxed` label.
+ *
+ * `--mode accept-edits` is the counterpart to claude's
+ * `--permission-mode acceptEdits`: without it, headless agy soft-denies
+ * the approvals it cannot ask for and returns having done nothing.
+ *
+ * `allowed_tools` is a no-op here, as it is for codex — agy has no
+ * argv-level tool allowlist. Silently accepting it and doing nothing is
+ * the existing contract for an agent that cannot honor it; what we must
+ * not do is report a narrower enforcement than we applied.
+ */
+export function resolveAntigravityArgv(
+  cfg: AppConfig,
+  prompt: string,
+  cwd: string,
+  allow_network: boolean,
+): ResolvedArgv {
+  const a: AgentConfig = cfg.agents.antigravity;
+  // exec_command is e.g. ["agy", "-p"]; like claude's `-p`, the prompt is
+  // the flag's value and goes immediately after it.
+  const argv: string[] = [...a.exec_command, prompt];
+
+  // Anchor agy to the validated cwd. This is NOT optional garnish, and it
+  // is the one place cempala deliberately emits a flag its own config is
+  // forbidden to contain — so the reasoning is worth stating in full.
+  //
+  // codex and claude take their working directory from the process:
+  // `spawnDetached({ cwd })` is the single mechanism, and a relative path
+  // in a prompt resolves there. agy does not work that way. It has a
+  // WORKSPACE concept separate from the process cwd, and with no workspace
+  // set it falls back to its own scratch directory. Measured against agy
+  // 1.1.12: a dispatch with cwd=<project> asking for `./out.txt` wrote to
+  // `~/.gemini/antigravity-cli/scratch/out.txt` instead. The work silently
+  // landed somewhere the caller never looks, and FR-14's cwd-anchored
+  // scope — which cempala validated the cwd for, and reported as enforced
+  // — simply did not apply to this agent.
+  //
+  // `--add-dir` is on the FR-14 forbidden list, and that is not a
+  // contradiction: the list is applied by `assertArgvSafe` to
+  // CONFIG-supplied argv only. There it stops a `config.toml` widening the
+  // scope past the validated cwd (`--add-dir /`). Here the argument IS the
+  // validated cwd, so the flag does the opposite of widening — it narrows
+  // agy from "my scratch dir, wherever that is" down to exactly the
+  // directory cempala checked against the trust boundary and the denylist.
+  // Forbidden from config, required in the baseline, for one reason: the
+  // cwd is ours to set and nobody else's to change.
+  //
+  // The cwd must be absolute. dispatch passes the canonicalized path, and
+  // a relative one here would be resolved by agy against whatever it
+  // considers its own cwd — reintroducing exactly the ambiguity this flag
+  // exists to remove.
+  if (!cwd || !isAbsolute(cwd)) {
+    throw new Error(
+      `resolveAntigravityArgv requires an absolute cwd (got ${JSON.stringify(cwd)}); ` +
+      `without it agy writes to its own scratch directory instead of the task's.`,
+    );
+  }
+  argv.push("--add-dir", cwd);
+
+  // FR-14 baseline — always applied, never sourced from config. As with
+  // codex's --sandbox and claude's --permission-mode, the config's
+  // sandbox_args / permission_args keys are parsed (and validated
+  // against the forbidden list) but not threaded into the argv.
+  argv.push("--mode", "accept-edits");
+  argv.push("--sandbox");
+
+  // Raise agy's own print-mode timeout to the reaper's window.
+  //
+  // agy is the only one of the three CLIs that kills its own run on a
+  // clock (`--print-timeout`, default 5m). Left at the default, an
+  // Antigravity task would die at five minutes while cempala went on
+  // tracking it for thirty — so a dispatch that timed out its wait and
+  // told the caller to come back via `check_task` would resolve to a
+  // truncated run, for a reason found nowhere in cempala's own settings.
+  // codex and claude have no such self-limit, and an agent that quietly
+  // stops early only when it happens to be this one is the kind of
+  // asymmetry nobody thinks to look for.
+  //
+  // ACTIVITY_GRACE_MS is the right number to match: past it the reaper
+  // sweeps the task regardless, so letting agy run longer would buy
+  // nothing.
+  argv.push("--print-timeout", `${Math.floor(ACTIVITY_GRACE_MS / 1000)}s`);
+
+  // Output format: keep JSON so agent-output.ts gets the structured
+  // envelope rather than prose it would have to hand back verbatim.
+  argv.push("--output-format", "json");
+
+  return {
+    argv,
+    network_enforcement: allow_network ? "allowed" : "not_enforceable",
+    description: allow_network
+      ? "agy -p sandbox(cmd) net=allowed"
+      : "agy -p sandbox(cmd) net=requested-off-but-not-enforceable",
+  };
+}
+
+/**
  * Public entry point used by `dispatch`. Resolves the argv for the named
  * target agent. Throws on an unknown agent id (callers should validate
  * earlier).
  */
 export function resolveAgentArgv(
   cfg: AppConfig,
-  target_agent: "codex" | "claude",
+  target_agent: AgentId,
   prompt: string,
+  /**
+   * The VALIDATED, canonical cwd — the same path dispatch spawns in.
+   *
+   * Required rather than optional on purpose. Only the antigravity branch
+   * reads it today, and an optional parameter is one a future call site
+   * forgets to pass; the failure that follows is silent (agy quietly
+   * writing to its scratch dir), which is the worst kind to leave
+   * available. Required means the compiler catches it.
+   */
+  cwd: string,
   allow_network: boolean,
   allowed_tools?: string[] | null,
 ): ResolvedArgv {
   if (target_agent === "codex") {
     return resolveCodexArgv(cfg, prompt, allow_network);
+  }
+  if (target_agent === "antigravity") {
+    return resolveAntigravityArgv(cfg, prompt, cwd, allow_network);
   }
   return resolveClaudeArgv(cfg, prompt, allow_network, allowed_tools);
 }

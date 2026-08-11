@@ -33,6 +33,19 @@ export const DEFAULT_OUTPUT_DIR = CEMPALA_OUTPUT_DIR;
 /** Default config file path. */
 export const DEFAULT_CONFIG_PATH = join(CEMPALA_HOME_DIR, "config.toml");
 
+/**
+ * Antigravity's global MCP config, shared by the Antigravity IDE and the
+ * `agy` CLI (`~/.gemini/config/mcp_config.json`, per
+ * https://antigravity.google/docs/mcp).
+ *
+ * Note the `.gemini` directory: it is Antigravity's, despite the name, and
+ * is NOT the separate Gemini CLI's config location. Writing one file
+ * registers cempala with both Antigravity surfaces at once, which is why
+ * the installer does not also touch the per-workspace
+ * `.agents/mcp_config.json`.
+ */
+export const ANTIGRAVITY_MCP_CONFIG_PATH = join(homedir(), ".gemini", "config", "mcp_config.json");
+
 /** Where the Windows installer drops the binary (separate from state). */
 export const WINDOWS_BIN_DIR = process.env.LOCALAPPDATA
   ? join(process.env.LOCALAPPDATA, "Cempala", "bin")

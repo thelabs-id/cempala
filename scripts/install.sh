@@ -14,7 +14,9 @@
 #      so future shells pick it up.
 #   5. Run `cempala --init` to write the default config if absent.
 #   6. Detect claude / codex on PATH, run matching mcp add for each found;
-#      print the manual command for each not found.
+#      print the manual command for each not found. Antigravity has no
+#      `mcp add`, so `cempala --register-antigravity` merges the entry into
+#      ~/.gemini/config/mcp_config.json instead.
 
 set -euo pipefail
 
@@ -601,14 +603,31 @@ register() {
 register claude "${bin_dir}/cempala" --scope user
 register codex  "${bin_dir}/cempala"
 
+# Antigravity has no `mcp add` subcommand — `agy --help` lists agent,
+# changelog, help, install, models, plugin and update, and the docs say to
+# edit `~/.gemini/config/mcp_config.json` directly. So the registration is a
+# JSON merge, and cempala does it itself rather than this script growing a
+# dependency on jq or python3 (and install.ps1 growing a second copy of the
+# same rule). It preserves any servers already in that file, and refuses to
+# touch a config it cannot parse.
+#
+# Registered unconditionally, not only when `agy` is on PATH: the same file
+# is read by the Antigravity IDE, which people install without ever putting
+# the CLI on PATH. The only cost of writing it for someone who has neither
+# is one unused entry in a file Antigravity would have created anyway.
+echo "→ registering cempala with Antigravity"
+"${bin_dir}/cempala" --register-antigravity "${bin_dir}/cempala" || \
+  echo "  ! antigravity registration step failed; cempala is otherwise installed"
+
 cat <<'EOF'
 
 ✓ cempala installed.
 
 Next steps:
-  - RESTART any Claude Code or Codex session that is already open, so it picks
-    up the registration. Until you do, it will show cempala as failed.
-  - Then run `<cli> mcp list` to confirm cempala is connected.
+  - RESTART any Claude Code, Codex or Antigravity session that is already open,
+    so it picks up the registration. Until you do, it will show cempala as failed.
+  - Then run `<cli> mcp list` to confirm cempala is connected (in Antigravity,
+    type `/mcp` in the prompt, or check Settings → Installed MCP Servers).
   - From any project under your home directory, dispatch or message the other agent.
   - For paths outside your home, call `approve_path` after the human confirms.
 

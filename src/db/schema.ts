@@ -95,13 +95,20 @@ CREATE INDEX IF NOT EXISTS idx_audit_timestamp
 -- no-op on DBs that never had it.
 DROP TABLE IF EXISTS schema_version;
 
--- Idempotent seed for the two agents we ship wired up (FR/AC mention
--- "claude" and "codex" as the v1 set). NG2 limits v1 to two; this is the
--- only seeding the system does — additional agents are added at runtime
--- when they're referenced.
+-- Idempotent seed for the agents we ship wired up. This is the only
+-- seeding the system does — any other agent id is added at runtime when
+-- it is first referenced.
+--
+-- INSERT OR IGNORE means this also seeds antigravity into databases
+-- created by an earlier build, on the next open, without a migration:
+-- the two existing rows are ignored and the new one lands. It matters
+-- because messages.from_agent / tasks.assigned_to are foreign keys, so
+-- an unseeded id would fail at the first mailbox hand-off rather than
+-- at anything that reads this table.
 INSERT OR IGNORE INTO agents(id, display_name, created_at) VALUES
-  ('claude', 'Claude Code', 0),
-  ('codex',  'Codex CLI',   0);
+  ('claude',      'Claude Code',     0),
+  ('codex',       'Codex CLI',       0),
+  ('antigravity', 'Antigravity CLI', 0);
 `;
 
 /**

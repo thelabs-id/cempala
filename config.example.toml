@@ -58,3 +58,14 @@ sandbox_args = ["--sandbox", "workspace-write"]
 [agents.claude]
 exec_command = ["claude", "-p"]
 permission_args = ["--permission-mode", "acceptEdits"]
+
+# Antigravity CLI. `agy` is the binary; `antigravity` is the agent id you use
+# in `dispatch`. Note that a dispatch to this agent CANNOT enforce
+# `allow_network = false`: agy has no argv-level network switch, so the result
+# reports `network_enforcement: "not_enforceable"` rather than claiming a
+# guarantee. Restrict its network reach in agy's own settings (the `read_url` /
+# `execute_url` permissions) if that matters to you.
+[agents.antigravity]
+exec_command = ["agy", "-p"]
+sandbox_args = ["--sandbox"]
+permission_args = ["--mode", "accept-edits"]

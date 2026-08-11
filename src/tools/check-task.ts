@@ -7,7 +7,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { DB } from "../db/client.ts";
-import { parseAgentOutput } from "./agent-output.ts";
+import { parseAgentOutput, resolveResultText } from "./agent-output.ts";
 import { assessTask } from "./task-liveness.ts";
 import type { Result } from "./send-message.ts";
 
@@ -51,26 +51,25 @@ export function checkTask(db: DB, input: CheckTaskInput): Result<CheckTaskOutput
           ? { exitCode: liveness.exitCode, resultText: liveness.resultText }
           : reconcileFromOutput(row.output_file);
       const finalStatus = exitCode === 0 ? "completed" : "failed";
-      // For failed runs, also read the stderr sibling if present
-      // (P2 fix). Many CLIs print auth/usage errors to stderr only —
-      // without this, the reconciled task is "failed" with an empty
-      // result and the caller has no actionable error. We detect
-      // the stderr sibling by convention: `<output_file>.err`.
-      let finalResult = resultText;
-      if (finalStatus === "failed" && row.output_file) {
-        const errFile = `${row.output_file}.err`;
-        let errText = "";
-        try {
-          errText = readFileSync(errFile, "utf-8").trim();
-        } catch {
-          // No stderr file; that's fine, stdout is the source of truth.
-        }
-        if (errText && !resultText) {
-          finalResult = errText;
-        } else if (errText) {
-          finalResult = `${resultText}\n\nstderr:\n${errText}`;
-        }
-      }
+      // Pull in the stderr sibling (`<output_file>.err`, by convention)
+      // when the run failed OR came back with nothing to say. Many CLIs
+      // print auth and usage errors to stderr only, and agy reports a
+      // headless permission auto-denial there while still exiting 0 —
+      // both leave a result the caller cannot act on unless stderr is
+      // read. The rule itself lives in agent-output.ts so this path and
+      // dispatch's three cannot drift apart again.
+      const finalResult = resolveResultText({
+        resultText,
+        ok: finalStatus === "completed",
+        readStderr: () => {
+          if (!row.output_file) return "";
+          try {
+            return readFileSync(`${row.output_file}.err`, "utf-8");
+          } catch {
+            return ""; // No stderr file; stdout is the source of truth.
+          }
+        },
+      });
       const now = Date.now();
       db.run(
         `UPDATE tasks SET status = ?, exit_code = ?, result = ?, completed_at = ? WHERE id = ? AND status = 'running'`,

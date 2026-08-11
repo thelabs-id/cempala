@@ -8,7 +8,7 @@
 // never emits, so the caller got a token-usage line or the raw JSONL blob
 // instead of the agent's answer.
 //
-// Two CLIs, two output shapes:
+// Three CLIs, three output shapes:
 //
 //   claude -p --output-format json
 //     ONE JSON object with a `result` field (plus `is_error` / `subtype`).
@@ -20,6 +20,20 @@
 //     `command_execution` items carry their own `exit_code` — that is the
 //     exit status of a command the agent ran, NOT the agent's exit status,
 //     and reading it as such was the other half of the drift.
+//
+//   agy -p --output-format json
+//     ONE JSON object again, but the answer is under `response` and the
+//     verdict under `status` — no `result`, no `is_error`. Verified against
+//     agy 1.1.12, which emits e.g.
+//       {"conversation_id":"","status":"ERROR","response":"",
+//        "error":"authentication failed or timed out","duration_seconds":0,
+//        "num_turns":0,"usage":{...}}
+//     This shape needs its own branch and not a `response ?? result`
+//     fallback: without one, a SUCCESS envelope matches none of the rules
+//     below and the caller receives the raw JSON blob where the answer
+//     should be — the exact failure the codex bug in this file's history
+//     was. (The ERROR case would have limped through the bare-`error`
+//     rule, which is what makes the success case so easy to miss.)
 
 export interface ParsedAgentOutput {
   /** The agent's final answer — what the calling agent should read. */
@@ -55,6 +69,41 @@ function fromResultObject(o: Record<string, unknown> | null): ParsedAgentOutput 
   return { resultText: String(o.result ?? ""), inferredExitCode: isError ? 1 : 0 };
 }
 
+/**
+ * Antigravity's shape: a lone object carrying `status` plus `response`.
+ *
+ * `status` is one of SUCCESS | ERROR | CANCELED | INTERRUPTED | INVALID |
+ * WAITING | RUNNING. The first is success and the next four are failures;
+ * WAITING and RUNNING are neither — they mean the run had not reached a
+ * verdict when this envelope was written, so we return `null` and let the
+ * caller's own signal (the real OS exit code, or liveness on the restart
+ * path) decide. Mapping them to 0 would report a half-finished run as
+ * completed; mapping them to 1 would fail a run still doing its job.
+ *
+ * A failed run's text comes from `error`, falling back to `response`: agy
+ * leaves `response` empty on failure and puts the reason in `error`, and a
+ * caller handed an empty string has been told nothing.
+ */
+function fromAntigravityObject(o: Record<string, unknown> | null): ParsedAgentOutput | null {
+  if (!o || typeof o.status !== "string") return null;
+  // Require `response` as well. `status` alone is far too common a key to
+  // claim an envelope on — a bare `{"status":"ok"}` from some other tool
+  // would otherwise be read as an agy verdict.
+  if (!("response" in o)) return null;
+
+  const status = o.status.toUpperCase();
+  const inferredExitCode =
+    status === "SUCCESS" ? 0
+    : status === "WAITING" || status === "RUNNING" ? null
+    : 1;
+
+  const response = typeof o.response === "string" ? o.response : "";
+  if (inferredExitCode === 0) return { resultText: response, inferredExitCode };
+
+  const err = errorTextOf(o);
+  return { resultText: err ?? response, inferredExitCode };
+}
+
 function errorTextOf(o: Record<string, unknown>): string | null {
   const e = o.error;
   if (typeof e === "string" && e.length > 0) return e;
@@ -68,11 +117,17 @@ function errorTextOf(o: Record<string, unknown>): string | null {
  * a launcher's plain-text diagnostics?
  *
  * Used to answer "did an agent ever actually start behind this process?".
- * Both CLIs emit JSON objects carrying either an event `type` or a `result`;
- * a shim that dies printing `usage: bad args` emits neither. The distinction
- * decides whether a dead launcher's failure is the whole story or whether
- * something is still working behind it, so getting it wrong means either a
- * false failure or a task left sitting at `running`.
+ * The CLIs emit JSON objects carrying an event `type`, a `result`, or —
+ * for agy — a `status`/`response` pair; a shim that dies printing
+ * `usage: bad args` emits none of them. The distinction decides whether a
+ * dead launcher's failure is the whole story or whether something is still
+ * working behind it, so getting it wrong means either a false failure or a
+ * task left sitting at `running`.
+ *
+ * The agy clause is not optional garnish. Its envelope carries neither
+ * `type` nor `result`, so without it every Antigravity run behind a Windows
+ * .cmd shim would look like output no agent produced — and a completed run
+ * would be recorded as a failure on the strength of the shim's exit status.
  */
 export function looksLikeAgentStream(text: string): boolean {
   if (!text || !text.trim()) return false;
@@ -80,9 +135,60 @@ export function looksLikeAgentStream(text: string): boolean {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const o = tryParse(trimmed);
-    if (o && (typeof o.type === "string" || "result" in o)) return true;
+    if (!o) continue;
+    if (typeof o.type === "string" || "result" in o) return true;
+    if (typeof o.status === "string" && "response" in o) return true;
   }
   return false;
+}
+
+/**
+ * Decide what the caller actually gets to read, given the parsed answer and
+ * whatever the run wrote to stderr.
+ *
+ * Every path that settles a task — dispatch's in-wait branch, its background
+ * reconcile, the orphan watcher, and check_task — used to carry its own copy
+ * of this rule, and every copy read stderr ONLY when the run had failed. That
+ * left one case reporting nothing at all: a run that exits 0, declares
+ * success, and produces an empty answer.
+ *
+ * It is not hypothetical. `agy` in headless mode auto-denies any tool needing
+ * a permission it cannot prompt for, and when that happens it exits 0, reports
+ * `status: "SUCCESS"`, returns `response: ""`, and writes the only
+ * explanation to stderr:
+ *
+ *   jetski: no output produced — a tool required the "command" permission
+ *   that headless mode cannot prompt for, so it was auto-denied. Add an
+ *   allow-rule under permissions.allow in settings.json …
+ *
+ * Gated on failure alone, cempala recorded that as `completed`, exit 0, with
+ * an empty result — telling the caller the work succeeded when nothing had
+ * happened, and throwing away the one line that said why. An empty answer is
+ * precisely when stderr is the only thing that can explain the outcome, so it
+ * earns the read just as a failure does.
+ *
+ * Note what this deliberately does NOT do: it does not turn that run into a
+ * `failed` one. The agent reported success and cempala relays verdicts rather
+ * than inventing them — a prompt whose whole effect is a file edit can
+ * legitimately return no prose, and failing it would be its own misreport.
+ * The caller gets the honest pair: the status the agent gave, and the reason
+ * text that explains it.
+ *
+ * `readStderr` is a thunk so the file is touched only when it is needed, and
+ * so this module stays free of filesystem access.
+ */
+export function resolveResultText(opts: {
+  resultText: string;
+  ok: boolean;
+  readStderr: () => string;
+}): string {
+  const { resultText, ok } = opts;
+  if (ok && resultText.trim()) return resultText;
+
+  const errText = opts.readStderr().trim();
+  if (!errText) return resultText;
+  if (!resultText.trim()) return errText;
+  return `${resultText}\n\nstderr:\n${errText}`;
 }
 
 /**
@@ -98,6 +204,12 @@ export function parseAgentOutput(text: string): ParsedAgentOutput {
   const whole = fromResultObject(tryParse(text));
   if (whole) return whole;
 
+  // --- Antigravity: the whole file is one JSON object with `status` +
+  //     `response`. Checked after claude's `result` so an envelope that
+  //     somehow carried both keeps its existing meaning. ---
+  const wholeAg = fromAntigravityObject(tryParse(text));
+  if (wholeAg) return wholeAg;
+
   // --- JSONL: parse every line we can, then interpret the stream. ---
   const objs = text
     .split(/\r?\n/)
@@ -107,9 +219,11 @@ export function parseAgentOutput(text: string): ParsedAgentOutput {
     .filter((o): o is Record<string, unknown> => o !== null);
 
   // A `result` field anywhere still wins — it is the canonical final answer
-  // whenever a CLI emits one.
+  // whenever a CLI emits one. Same for an agy envelope on a line of its
+  // own: a CLI that prefixes its JSON with a banner line, or a shell that
+  // appends one, must not cost the caller the answer.
   for (const o of objs) {
-    const hit = fromResultObject(o);
+    const hit = fromResultObject(o) ?? fromAntigravityObject(o);
     if (hit) return hit;
   }
 

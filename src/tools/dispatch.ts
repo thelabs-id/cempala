@@ -30,15 +30,16 @@ import type { AppConfig } from "../config.ts";
 import { evaluateTrustBoundary } from "../security/trust-boundary.ts";
 import { effectivePathDenylist, matchPromptDenylist, matchAbsolutePathDenylist } from "../security/denylist.ts";
 import { canonicalize } from "../security/paths.ts";
-import { resolveAgentArgv, type NetworkEnforcement } from "./agent-args.ts";
-import { parseAgentOutput } from "./agent-output.ts";
+import { resolveAgentArgv, type AgentId, type NetworkEnforcement } from "./agent-args.ts";
+import { AGENT_IDS } from "../config.ts";
+import { parseAgentOutput, resolveResultText } from "./agent-output.ts";
 import { assessTask, ACTIVITY_GRACE_MS } from "./task-liveness.ts";
 import { spawnDetached, isAlive, makeOutputFile } from "../platform/spawn.ts";
 import type { Result } from "./send-message.ts";
 import { ensureAgent } from "./send-message.ts";
 
 export interface DispatchInput {
-  target_agent: "codex" | "claude";
+  target_agent: AgentId;
   prompt: string;
   cwd: string;
   // Optional fields can be `null` from the MCP wire format (the schema
@@ -76,8 +77,17 @@ export async function dispatch(
   if (!input.target_agent || !input.prompt || !input.cwd) {
     return { ok: false, error: "target_agent, prompt, and cwd are required", code: "invalid_input" };
   }
-  if (input.target_agent !== "codex" && input.target_agent !== "claude") {
-    return { ok: false, error: `unsupported target_agent '${input.target_agent}'`, code: "invalid_input" };
+  // Validate against the shared AGENT_IDS list rather than a chain of !==
+  // comparisons. The chain was one more place that had to be edited in
+  // lockstep with the tool schema's enum, and a target the schema
+  // advertised but this check rejected would fail with a confusing error
+  // at the very end of a caller's turn.
+  if (!(AGENT_IDS as readonly string[]).includes(input.target_agent)) {
+    return {
+      ok: false,
+      error: `unsupported target_agent '${input.target_agent}' (expected one of: ${AGENT_IDS.join(", ")})`,
+      code: "invalid_input",
+    };
   }
 
   // Runtime type check for `wait_seconds` (P1 fix). The schema
@@ -246,7 +256,11 @@ export async function dispatch(
 
   // (allow_network is already validated and resolved to a boolean
   // above, before the row insert; the resolved value is reused here.)
-  const resolved = resolveAgentArgv(cfg, input.target_agent, input.prompt, allowNetwork, input.allowed_tools);
+  // `validatedCwd` — not `input.cwd`. The argv must be anchored to the same
+  // canonical path we validated and spawn in; agy takes its workspace from
+  // the argv rather than from the process cwd, so passing the raw input
+  // here would let a relative or tilde form reach the agent unresolved.
+  const resolved = resolveAgentArgv(cfg, input.target_agent, input.prompt, validatedCwd, allowNetwork, input.allowed_tools);
 
   // Make sure the output dir exists, then make the output file path.
   const outDir = cfg.server.output_dir;
@@ -296,15 +310,11 @@ export async function dispatch(
     const out = readOutputFile(outFile);
     const parsed = parseAgentOutput(out);
     const { exitCode, ok } = judgeOutcome(outcome.exitCode, parsed.inferredExitCode, handle.pidIsAgent);
-    let finalResult = parsed.resultText;
-    if (!ok) {
-      const errText = readOutputFile(handle.stderrFile).trim();
-      if (errText && !finalResult) {
-        finalResult = errText;
-      } else if (errText) {
-        finalResult = `${finalResult}\n\nstderr:\n${errText}`;
-      }
-    }
+    const finalResult = resolveResultText({
+      resultText: parsed.resultText,
+      ok,
+      readStderr: () => readOutputFile(handle.stderrFile),
+    });
     const finalStatus = ok ? "completed" : "failed";
     db.run(
       `UPDATE tasks SET status = ?, result = ?, exit_code = ?, completed_at = ? WHERE id = ?`,
@@ -373,19 +383,11 @@ function scheduleBackgroundReconcile(
       const out = readOutputFile(outFile);
       const parsed = parseAgentOutput(out);
       const { exitCode, ok } = judgeOutcome(rawExitCode, parsed.inferredExitCode, handle.pidIsAgent);
-      let resultText = parsed.resultText;
-      // For failed runs, also read the stderr sibling (P2 fix). Many
-      // CLIs print auth/usage errors to stderr only — without this
-      // step, the task row would say "failed" with an empty result
-      // and the caller would have no actionable error.
-      if (!ok) {
-        const errText = readOutputFile(handle.stderrFile).trim();
-        if (errText && !resultText) {
-          resultText = errText;
-        } else if (errText) {
-          resultText = `${resultText}\n\nstderr:\n${errText}`;
-        }
-      }
+      const resultText = resolveResultText({
+        resultText: parsed.resultText,
+        ok,
+        readStderr: () => readOutputFile(handle.stderrFile),
+      });
       const finalStatus = ok ? "completed" : "failed";
       // Only update if the row is still "running" — the reaper may have
       // swept it as a stale task in the meantime, in which case we
@@ -459,18 +461,14 @@ function watchOrphanedRun(
               ? launcherExitCode
               : -1;
         const ok = exitCode === 0;
-        let resultText =
-          liveness.state === "finished"
-            ? liveness.resultText
-            : parseAgentOutput(readOutputFile(outFile)).resultText;
-        if (!ok) {
-          const errText = readOutputFile(handle.stderrFile).trim();
-          if (errText && !resultText) {
-            resultText = errText;
-          } else if (errText) {
-            resultText = `${resultText}\n\nstderr:\n${errText}`;
-          }
-        }
+        const resultText = resolveResultText({
+          resultText:
+            liveness.state === "finished"
+              ? liveness.resultText
+              : parseAgentOutput(readOutputFile(outFile)).resultText,
+          ok,
+          readStderr: () => readOutputFile(handle.stderrFile),
+        });
         db.run(
           `UPDATE tasks SET status = ?, result = ?, exit_code = ?, completed_at = ?
             WHERE id = ? AND status = 'running'`,

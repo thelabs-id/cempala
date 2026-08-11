@@ -94,3 +94,60 @@ describe("additive column migrations", () => {
     }
   });
 });
+
+describe("agent seed", () => {
+  function agentIdsIn(dbPath: string): string[] {
+    const db = openDatabase(dbPath);
+    try {
+      return (db.all<{ id: string }>(`SELECT id FROM agents ORDER BY id`)).map((r) => r.id);
+    } finally {
+      db.raw.close();
+    }
+  }
+
+  test("a fresh database seeds every shipped agent", () => {
+    expect(agentIdsIn(join(dir, "seed-fresh.db"))).toEqual(["antigravity", "claude", "codex"]);
+  });
+
+  test("a database seeded by an earlier build gains antigravity on the next open", () => {
+    // messages.from_agent and tasks.assigned_to are foreign keys into this
+    // table, so an id that never got seeded does not fail here — it fails
+    // at the first mailbox hand-off, a long way from the cause. The
+    // INSERT OR IGNORE seed is what makes the upgrade path work without a
+    // migration entry; this asserts it actually does.
+    const dbPath = join(dir, "seed-old.db");
+    const old = new Database(dbPath, { create: true });
+    old.exec(`
+      CREATE TABLE agents (
+        id            TEXT NOT NULL PRIMARY KEY,
+        display_name  TEXT NOT NULL,
+        created_at    INTEGER NOT NULL
+      );
+      INSERT INTO agents(id, display_name, created_at) VALUES
+        ('claude', 'Claude Code', 0),
+        ('codex',  'Codex CLI',   0);
+    `);
+    old.close();
+
+    expect(agentIdsIn(dbPath)).toEqual(["antigravity", "claude", "codex"]);
+  });
+
+  test("re-opening does not duplicate or rewrite the seeded rows", () => {
+    const dbPath = join(dir, "seed-twice.db");
+    const first = openDatabase(dbPath);
+    first.run(`UPDATE agents SET display_name = 'Renamed' WHERE id = 'antigravity'`);
+    first.raw.close();
+
+    const second = openDatabase(dbPath);
+    try {
+      const rows = second.all<{ id: string; display_name: string }>(
+        `SELECT id, display_name FROM agents WHERE id = 'antigravity'`,
+      );
+      expect(rows).toHaveLength(1);
+      // INSERT OR IGNORE must not clobber a row that is already there.
+      expect(rows[0]!.display_name).toBe("Renamed");
+    } finally {
+      second.raw.close();
+    }
+  });
+});

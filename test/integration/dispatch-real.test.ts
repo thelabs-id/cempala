@@ -1,6 +1,6 @@
 // test/integration/dispatch-real.test.ts
 //
-// AC-1, AC-2: actually spawn codex and claude and have them do work.
+// AC-1, AC-2: actually spawn codex, claude and agy and have them do work.
 // AC-5: a long-running child returns 'running' at the timeout boundary.
 // AC-6 (direct reconcile): check_task on a killed running task reconciles it.
 // AC-9: needs_approval → approve_path → success on a real outside-home cwd.
@@ -17,7 +17,7 @@ import { checkTask } from "../../src/tools/check-task.ts";
 import { spawn } from "bun";
 import { sweepStaleTasks } from "../../src/reaper.ts";
 
-const SKIP_REASON = "set CEMPALA_INTEGRATION=1 to run integration tests (require codex + claude on PATH)";
+const SKIP_REASON = "set CEMPALA_INTEGRATION=1 to run integration tests (require codex + claude + agy on PATH)";
 
 /**
  * Kill a process AND its descendants.
@@ -113,6 +113,52 @@ module.exports = { add, sub };
           // visible — but don't fail the test for an expired OAuth token.
           console.warn("claude dispatch returned failed (likely auth):", r.data.result?.slice(0, 200));
           expect(r.data.network_enforcement).toBe("tools_only");
+        } else {
+          throw new Error(`expected completed or failed, got ${r.data.status}: ${JSON.stringify(r.data)}`);
+        }
+      }
+    } finally { env.cleanup(); }
+  }, { timeout: 600_000 });
+
+  test("antigravity writes a file in the cwd and reports network_enforcement honestly", async () => {
+    const env = makeIntEnv();
+    try {
+      const target = join(env.homeCwd, "antigravity-wrote-this.txt");
+      const r = await dispatch(env.db, env.cfg, {
+        target_agent: "antigravity",
+        // A RELATIVE path on purpose. An absolute one proves nothing: agy
+        // honors those wherever its workspace happens to be. Relative is
+        // the case that caught the real bug — without `--add-dir <cwd>` it
+        // resolved against ~/.gemini/antigravity-cli/scratch and the file
+        // never appeared in the dispatch cwd at all.
+        prompt: `Create a file at the relative path ./antigravity-wrote-this.txt containing exactly the word OK and nothing else. Use your file-writing tool, not a shell command. Do not touch any other files.`,
+        cwd: env.homeCwd,
+        allow_network: false,
+        wait_seconds: 300,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        // The label is asserted on BOTH branches. It is the one thing that
+        // must hold whatever the CLI does, and an unauthenticated agy —
+        // which returns `authentication failed or timed out` after waiting
+        // for a sign-in a headless run can never complete — is exactly the
+        // environment where a mislabeled result would go unnoticed.
+        if (r.data.status === "completed") {
+          expect(r.data.network_enforcement).toBe("not_enforceable");
+          // The file must be in the DISPATCH CWD, not agy's scratch dir.
+          expect(existsSync(target)).toBe(true);
+          expect(readFileSync(target, "utf-8").trim()).toBe("OK");
+          // A run that did nothing must never come back with an empty
+          // result: agy reports a headless permission auto-denial by
+          // exiting 0 with `response: ""` and the reason on stderr only.
+          expect((r.data.result ?? "").trim().length).toBeGreaterThan(0);
+        } else if (r.data.status === "failed") {
+          console.warn("antigravity dispatch returned failed (likely auth):", r.data.result?.slice(0, 200));
+          expect(r.data.network_enforcement).toBe("not_enforceable");
+          // Whatever went wrong, the caller must get the reason and not the
+          // raw JSON envelope it was buried in.
+          expect(r.data.result ?? "").not.toContain("conversation_id");
         } else {
           throw new Error(`expected completed or failed, got ${r.data.status}: ${JSON.stringify(r.data)}`);
         }

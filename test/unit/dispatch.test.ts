@@ -55,6 +55,10 @@ beforeEach(() => {
         exec_command: [process.execPath, join(scriptsDir, "fast.js")],
         // No permission_args
       },
+      antigravity: {
+        exec_command: [process.execPath, join(scriptsDir, "fast.js")],
+        // No sandbox_args / permission_args
+      },
     },
     source: "<test>",
   };
@@ -433,6 +437,147 @@ describe("dispatch (FR-6) — fake CLI", () => {
         } else {
           throw new Error(`expected completed, got ${r.data.status}`);
         }
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("an antigravity dispatch completes and reports network_enforcement honestly", async () => {
+    const env = makeEnv();
+    try {
+      // A stand-in emitting agy's real envelope shape: `status` + `response`,
+      // no `result`, no `type`.
+      const agPath = join(scriptsDir, "fake-agy.js");
+      writeFileSync(agPath,
+        `console.log(JSON.stringify({ conversation_id: "c1", status: "SUCCESS", response: "PONG", num_turns: 1 }));`);
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        agents: { ...cfgOverride.agents, antigravity: { exec_command: [process.execPath, agPath] } },
+        server: env.cfg.server,
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "antigravity",
+        prompt: "do something",
+        cwd: homeCwd,
+        created_by: "claude",
+        allow_network: false,
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        if (r.data.status !== "completed") throw new Error(`expected completed, got ${r.data.status}`);
+        // The answer, not the envelope.
+        expect(r.data.result).toBe("PONG");
+        expect(r.data.exit_code).toBe(0);
+        // allow_network=false was asked for and could NOT be enforced.
+        // Reporting anything else here is the failure this label exists
+        // to prevent.
+        expect(r.data.network_enforcement).toBe("not_enforceable");
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("a SUCCESSFUL run with an empty answer surfaces the stderr reason", async () => {
+    // The real agy headless soft-deny: exit 0, status SUCCESS, empty
+    // response, and the only explanation on stderr. Before the fix this
+    // was recorded as `completed` with result "" — the caller told the
+    // work succeeded, and the one line saying otherwise thrown away.
+    const env = makeEnv();
+    try {
+      const p = join(scriptsDir, "fake-agy-softdeny.js");
+      writeFileSync(p,
+        `console.log(JSON.stringify({ conversation_id: "c1", status: "SUCCESS", response: "", num_turns: 1 }));` +
+        `process.stderr.write('jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.');`);
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        agents: { ...cfgOverride.agents, antigravity: { exec_command: [process.execPath, p] } },
+        server: env.cfg.server,
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "antigravity", prompt: "x", cwd: homeCwd, created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        // The verdict stays the agent's — cempala relays, it does not invent.
+        expect(r.data.status).toBe("completed");
+        if (r.data.status !== "completed") throw new Error("unreachable");
+        expect(r.data.exit_code).toBe(0);
+        // But the caller gets something it can act on, not "".
+        expect(r.data.result).not.toBe("");
+        expect(r.data.result).toContain("auto-denied");
+        // And it is persisted, not just returned.
+        const row = env.db.get<{ result: string }>(`SELECT result FROM tasks WHERE id = ?`, [r.data.task_id]);
+        expect(row?.result).toContain("auto-denied");
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("a successful run WITH an answer does not get stderr glued onto it", async () => {
+    // The other side of the rule: progress chatter on stderr must not
+    // contaminate a perfectly good answer.
+    const env = makeEnv();
+    try {
+      const p = join(scriptsDir, "fake-agy-chatty.js");
+      writeFileSync(p,
+        `process.stderr.write("loading model...\\nthinking...");` +
+        `console.log(JSON.stringify({ status: "SUCCESS", response: "PONG" }));`);
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        agents: { ...cfgOverride.agents, antigravity: { exec_command: [process.execPath, p] } },
+        server: env.cfg.server,
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "antigravity", prompt: "x", cwd: homeCwd, created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok && r.data.status === "completed") {
+        expect(r.data.result).toBe("PONG");
+        expect(r.data.result).not.toContain("loading model");
+      } else {
+        throw new Error(`expected completed, got ${(r as any).data?.status}`);
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("an antigravity run that reports ERROR with a zero exit is recorded as failed", async () => {
+    // agy exits non-zero on failure, but the same rule that catches
+    // claude's is_error must hold here: the envelope's own verdict
+    // decides when the exit code says success.
+    const env = makeEnv();
+    try {
+      const agPath = join(scriptsDir, "fake-agy-err.js");
+      writeFileSync(agPath,
+        `console.log(JSON.stringify({ status: "ERROR", response: "", error: "authentication failed or timed out" })); process.exit(0);`);
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        agents: { ...cfgOverride.agents, antigravity: { exec_command: [process.execPath, agPath] } },
+        server: env.cfg.server,
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "antigravity",
+        prompt: "x",
+        cwd: homeCwd,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.data.status).toBe("failed");
+        if (r.data.status === "failed") expect(r.data.result).toContain("authentication failed");
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("an unknown target_agent is rejected with the supported list", async () => {
+    const env = makeEnv();
+    try {
+      const cfg: AppConfig = { ...cfgOverride, server: env.cfg.server };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "gemini" as never,
+        prompt: "x",
+        cwd: homeCwd,
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("invalid_input");
+        expect(r.error).toContain("antigravity");
       }
     } finally { env.cleanup(); }
   });

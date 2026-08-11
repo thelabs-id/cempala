@@ -111,4 +111,74 @@ describe("sweepStaleTasks (FR-17 / AC-6 sweep path)", () => {
       expect(row?.exit_code).toBe(0);
     } finally { env.cleanup(); }
   });
+
+  test("a swept run that said nothing on stdout surfaces its stderr, not the canned message", async () => {
+    // Parity with dispatch and check_task. This path used to fall straight
+    // through to STALE_RESULT whenever stdout carried no answer, so a run
+    // whose only explanation went to stderr was swept into a generic
+    // "check output_file" — while the very same row, read through
+    // check_task, would have told the caller what actually happened.
+    //
+    // agy makes this reachable on a SUCCESSFUL run: a headless permission
+    // auto-denial exits 0 with `response: ""` and writes the reason to
+    // stderr alone.
+    const env = makeEnv();
+    try {
+      const proc = spawn({ cmd: [process.execPath, "-e", "process.exit(0)"], stdio: ["ignore", "ignore", "ignore"] });
+      const childPid = proc.pid;
+      await proc.exited;
+
+      const outFile = join(env.dir, "softdeny-output.log");
+      writeFileSync(outFile, JSON.stringify({ conversation_id: "c1", status: "SUCCESS", response: "" }));
+      writeFileSync(`${outFile}.err`, `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.`);
+      const old = new Date(Date.now() - 31 * 60 * 1000);
+      utimesSync(outFile, old, old);
+      utimesSync(`${outFile}.err`, old, old);
+
+      const past = Date.now() - 31 * 60 * 1000;
+      env.db.run(
+        `INSERT INTO tasks(id, description, created_by, cwd, status, via, created_at, started_at, pid, output_file)
+         VALUES ('t-soft', 'silent', 'claude', '.', 'running', 'dispatch', ?, ?, ?, ?)`,
+        [past, past, childPid, outFile],
+      );
+
+      expect(sweepStaleTasks(env.db, Date.now()).swept).toBe(1);
+      const row = env.db.get<{ status: string; result: string; exit_code: number | null }>(
+        `SELECT status, result, exit_code FROM tasks WHERE id='t-soft'`,
+      );
+      // The agent's own verdict is preserved — the sweep does not invent one.
+      expect(row?.status).toBe("completed");
+      expect(row?.exit_code).toBe(0);
+      // And the caller gets the reason instead of the canned message.
+      expect(row?.result).toContain("auto-denied");
+      expect(row?.result).not.toContain("check output_file");
+    } finally { env.cleanup(); }
+  });
+
+  test("a swept run with nothing on either stream still gets the canned message", async () => {
+    // STALE_RESULT remains the last resort. An empty result would leave the
+    // caller with nothing at all.
+    const env = makeEnv();
+    try {
+      const proc = spawn({ cmd: [process.execPath, "-e", "process.exit(0)"], stdio: ["ignore", "ignore", "ignore"] });
+      const childPid = proc.pid;
+      await proc.exited;
+
+      const outFile = join(env.dir, "silent-output.log");
+      writeFileSync(outFile, "");
+      const old = new Date(Date.now() - 31 * 60 * 1000);
+      utimesSync(outFile, old, old);
+
+      const past = Date.now() - 31 * 60 * 1000;
+      env.db.run(
+        `INSERT INTO tasks(id, description, created_by, cwd, status, via, created_at, started_at, pid, output_file)
+         VALUES ('t-silent', 'silent', 'claude', '.', 'running', 'dispatch', ?, ?, ?, ?)`,
+        [past, past, childPid, outFile],
+      );
+
+      expect(sweepStaleTasks(env.db, Date.now()).swept).toBe(1);
+      const row = env.db.get<{ result: string }>(`SELECT result FROM tasks WHERE id='t-silent'`);
+      expect(row?.result).toContain("check output_file");
+    } finally { env.cleanup(); }
+  });
 });
