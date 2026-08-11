@@ -143,53 +143,113 @@ export function looksLikeAgentStream(text: string): boolean {
 }
 
 /**
- * Decide what the caller actually gets to read, given the parsed answer and
- * whatever the run wrote to stderr.
+ * A CLI announcing, in prose on stderr, that it ran but deliberately did
+ * nothing.
  *
- * Every path that settles a task — dispatch's in-wait branch, its background
- * reconcile, the orphan watcher, and check_task — used to carry its own copy
- * of this rule, and every copy read stderr ONLY when the run had failed. That
- * left one case reporting nothing at all: a run that exits 0, declares
- * success, and produces an empty answer.
- *
- * It is not hypothetical. `agy` in headless mode auto-denies any tool needing
- * a permission it cannot prompt for, and when that happens it exits 0, reports
- * `status: "SUCCESS"`, returns `response: ""`, and writes the only
- * explanation to stderr:
+ * `agy` in headless mode auto-denies any tool needing a permission it cannot
+ * prompt for. It reports that denial in the worst possible way: exit 0,
+ * `status: "SUCCESS"`, `response: ""`, and the only explanation on stderr —
  *
  *   jetski: no output produced — a tool required the "command" permission
  *   that headless mode cannot prompt for, so it was auto-denied. Add an
  *   allow-rule under permissions.allow in settings.json …
  *
- * Gated on failure alone, cempala recorded that as `completed`, exit 0, with
- * an empty result — telling the caller the work succeeded when nothing had
- * happened, and throwing away the one line that said why. An empty answer is
- * precisely when stderr is the only thing that can explain the outcome, so it
- * earns the read just as a failure does.
+ * Both phrases matched here come from the fixed part of that message; the
+ * permission name in the middle varies. Matching on the internal codename
+ * (`jetski`) instead would be brittle in a way that buys nothing.
  *
- * Note what this deliberately does NOT do: it does not turn that run into a
- * `failed` one. The agent reported success and cempala relays verdicts rather
- * than inventing them — a prompt whose whole effect is a file edit can
- * legitimately return no prose, and failing it would be its own misreport.
- * The caller gets the honest pair: the status the agent gave, and the reason
- * text that explains it.
+ * The match is deliberately narrow, because the two ways of being wrong here
+ * are not symmetric. A false negative leaves a run reported exactly as it is
+ * today. A false positive fails a run that genuinely succeeded — so this must
+ * only fire on a CLI's own explicit statement that it produced no output.
  *
- * `readStderr` is a thunk so the file is touched only when it is needed, and
- * so this module stays free of filesystem access.
+ * The phrases must appear in order and within one statement of each other,
+ * not merely both somewhere in the stream. Two independent regexes tested
+ * against the whole capture would let unrelated diagnostics — a warning
+ * mentioning "no output produced" early, an unrelated "auto-denied" much
+ * later — combine into a false positive that fails a run which actually
+ * succeeded.
  */
-export function resolveResultText(opts: {
+const SILENT_NO_OP_STDERR = /no output produced[^\n]{0,400}?auto-denied/i;
+
+function isSilentNoOp(stderrText: string): boolean {
+  return SILENT_NO_OP_STDERR.test(stderrText);
+}
+
+export interface ReconciledOutcome {
+  /** What the caller reads. */
   resultText: string;
+  /** Exit code to persist — may differ from the one passed in (see below). */
+  exitCode: number;
+  /** Whether this counts as success. Always `exitCode === 0`. */
   ok: boolean;
+}
+
+/**
+ * Settle a finished run: combine the parsed answer with whatever went to
+ * stderr, and decide whether stderr contradicts an apparent success.
+ *
+ * Every path that settles a task — dispatch's in-wait branch, its background
+ * reconcile, the orphan watcher, check_task and the reaper — used to carry
+ * its own copy of this logic, and every copy read stderr ONLY when the run
+ * had already failed. That left one case reporting nothing at all: a run that
+ * exits 0, declares success, and produces an empty answer. Cempala recorded
+ * `completed` / exit 0 / empty result — telling the caller the work succeeded
+ * when nothing had happened, and discarding the one line that said why.
+ *
+ * Two rules, in one place so the five paths cannot drift apart again:
+ *
+ *  1. An empty answer earns the stderr read, just as a failure does. It is
+ *     precisely the case where stderr is the only thing that can explain the
+ *     outcome.
+ *
+ *  2. If that stderr is the agent stating it deliberately produced no output,
+ *     the run is a FAILURE regardless of the zero exit status. This is not
+ *     cempala inventing a verdict — it is reading the one the CLI gave in
+ *     prose rather than in its JSON envelope, and it is the same principle
+ *     `judgeOutcome` already applies to Claude's `is_error: true` alongside
+ *     a successful exit.
+ *
+ * What rule 2 deliberately does NOT do is fail every empty answer. A prompt
+ * whose whole effect is a file edit can legitimately return no prose, and
+ * failing that would be its own misreport. Only an explicit did-nothing
+ * statement flips the verdict.
+ *
+ * `readStderr` is a thunk so the file is touched only when needed, and so
+ * this module stays free of filesystem access.
+ */
+export function reconcileOutcome(opts: {
+  resultText: string;
+  /** The exit code as judged so far (OS status reconciled with the output). */
+  exitCode: number;
   readStderr: () => string;
-}): string {
-  const { resultText, ok } = opts;
-  if (ok && resultText.trim()) return resultText;
+}): ReconciledOutcome {
+  const { resultText, exitCode } = opts;
+  const ok = exitCode === 0;
+
+  // A successful run that actually said something needs nothing from stderr,
+  // and must not have progress chatter glued onto its answer.
+  if (ok && resultText.trim()) return { resultText, exitCode, ok: true };
 
   const errText = opts.readStderr().trim();
-  if (!errText) return resultText;
-  if (!resultText.trim()) return errText;
-  return `${resultText}\n\nstderr:\n${errText}`;
+
+  // Rule 2: an explicit "I produced no output" outranks the zero exit.
+  if (ok && !resultText.trim() && isSilentNoOp(errText)) {
+    return { resultText: errText, exitCode: SILENT_NO_OP_EXIT_CODE, ok: false };
+  }
+
+  if (!errText) return { resultText, exitCode, ok };
+  if (!resultText.trim()) return { resultText: errText, exitCode, ok };
+  return { resultText: `${resultText}\n\nstderr:\n${errText}`, exitCode, ok };
 }
+
+/**
+ * The exit code recorded for a run that announced it did nothing. The OS
+ * status was 0, so a code has to be chosen; 1 is the same value
+ * `parseAgentOutput` infers for an agent-reported error, which keeps a
+ * soft-denied run indistinguishable in shape from any other failed one.
+ */
+export const SILENT_NO_OP_EXIT_CODE = 1;
 
 /**
  * Extract the agent's final answer (and, where the output says so, a verdict)

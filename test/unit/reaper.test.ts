@@ -146,9 +146,11 @@ describe("sweepStaleTasks (FR-17 / AC-6 sweep path)", () => {
       const row = env.db.get<{ status: string; result: string; exit_code: number | null }>(
         `SELECT status, result, exit_code FROM tasks WHERE id='t-soft'`,
       );
-      // The agent's own verdict is preserved — the sweep does not invent one.
-      expect(row?.status).toBe("completed");
-      expect(row?.exit_code).toBe(0);
+      // The sweep settles on exactly the terms the other paths use: the
+      // agent's own "I produced no output" outranks its zero exit, and the
+      // recorded code agrees with the status.
+      expect(row?.status).toBe("failed");
+      expect(row?.exit_code).toBe(1);
       // And the caller gets the reason instead of the canned message.
       expect(row?.result).toContain("auto-denied");
       expect(row?.result).not.toContain("check output_file");

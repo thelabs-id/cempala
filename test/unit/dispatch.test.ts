@@ -475,11 +475,14 @@ describe("dispatch (FR-6) — fake CLI", () => {
     } finally { env.cleanup(); }
   });
 
-  test("a SUCCESSFUL run with an empty answer surfaces the stderr reason", async () => {
+  test("a run that says on stderr it did nothing is recorded as FAILED, not completed", async () => {
     // The real agy headless soft-deny: exit 0, status SUCCESS, empty
-    // response, and the only explanation on stderr. Before the fix this
-    // was recorded as `completed` with result "" — the caller told the
-    // work succeeded, and the one line saying otherwise thrown away.
+    // response, and the only explanation on stderr. Two bugs lived here.
+    // First the result came back empty, because stderr was read only on
+    // failure. Then, with the text surfaced but the verdict left alone,
+    // the row still said `completed` for a run that had explicitly
+    // announced it did nothing — which a calling agent reads as "the work
+    // is done". Both halves have to be right.
     const env = makeEnv();
     try {
       const p = join(scriptsDir, "fake-agy-softdeny.js");
@@ -496,16 +499,46 @@ describe("dispatch (FR-6) — fake CLI", () => {
       });
       expect(r.ok).toBe(true);
       if (r.ok) {
-        // The verdict stays the agent's — cempala relays, it does not invent.
-        expect(r.data.status).toBe("completed");
-        if (r.data.status !== "completed") throw new Error("unreachable");
-        expect(r.data.exit_code).toBe(0);
-        // But the caller gets something it can act on, not "".
+        expect(r.data.status).toBe("failed");
+        if (r.data.status !== "failed") throw new Error("unreachable");
+        // The zero exit is overturned, and the recorded code agrees with
+        // the status — a `failed` row carrying exit_code 0 would
+        // contradict itself.
+        expect(r.data.exit_code).toBe(1);
+        // And the caller gets something actionable, not "".
         expect(r.data.result).not.toBe("");
         expect(r.data.result).toContain("auto-denied");
-        // And it is persisted, not just returned.
-        const row = env.db.get<{ result: string }>(`SELECT result FROM tasks WHERE id = ?`, [r.data.task_id]);
+        // Persisted, not merely returned.
+        const row = env.db.get<{ result: string; status: string; exit_code: number }>(
+          `SELECT result, status, exit_code FROM tasks WHERE id = ?`, [r.data.task_id],
+        );
+        expect(row?.status).toBe("failed");
+        expect(row?.exit_code).toBe(1);
         expect(row?.result).toContain("auto-denied");
+      }
+    } finally { env.cleanup(); }
+  });
+
+  test("an empty answer with NO did-nothing statement is still a success", async () => {
+    // The boundary of the rule above. A prompt whose whole effect is a
+    // file edit can legitimately return no prose, and failing it would be
+    // its own misreport.
+    const env = makeEnv();
+    try {
+      const p = join(scriptsDir, "fake-agy-quiet.js");
+      writeFileSync(p, `console.log(JSON.stringify({ status: "SUCCESS", response: "" }));`);
+      const cfg: AppConfig = {
+        ...cfgOverride,
+        agents: { ...cfgOverride.agents, antigravity: { exec_command: [process.execPath, p] } },
+        server: env.cfg.server,
+      };
+      const r = await dispatch(env.db, cfg, {
+        target_agent: "antigravity", prompt: "x", cwd: homeCwd, created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.data.status).toBe("completed");
+        if (r.data.status === "completed") expect(r.data.exit_code).toBe(0);
       }
     } finally { env.cleanup(); }
   });

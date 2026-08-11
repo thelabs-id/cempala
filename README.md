@@ -182,16 +182,18 @@ The dispatch still runs. Reporting `"sandboxed"` here would be the one failure t
 
 `--mode accept-edits` lets agy read and write files in the dispatch cwd, the same way `--permission-mode acceptEdits` does for Claude. **Shell commands are a different matter.** In headless mode agy auto-denies any tool needing a permission it cannot prompt for, and it does so quietly: the run exits `0`, reports `status: "SUCCESS"`, returns an empty answer, and writes the only explanation to stderr.
 
-Cempala surfaces that explanation rather than handing you an empty result — a run with nothing to say has its stderr read and returned, exactly as a failed run does:
+Cempala reports that as a **failure**, with the reason attached:
 
 ```
-status: "completed", exit_code: 0
+status: "failed", exit_code: 1
 result:  jetski: no output produced — a tool required the "command" permission
          that headless mode cannot prompt for, so it was auto-denied. Add an
          allow-rule under permissions.allow in settings.json …
 ```
 
-The status stays `completed` because that is what the agent reported, and a prompt whose whole effect is a file edit can legitimately return no prose. Cempala relays verdicts; it doesn't invent them.
+That is not cempala overruling the agent. The agent said it produced no output — it just said so in prose on stderr rather than in its JSON envelope, and a run that announces it did nothing did not succeed. It's the same principle already applied to Claude's `is_error: true` alongside a zero exit.
+
+The match is deliberately narrow, and only fires on that explicit did-nothing statement. An empty answer on its own stays `completed`: a prompt whose whole effect is a file edit can legitimately return no prose, and failing that would be its own misreport.
 
 If you want Antigravity dispatches to run shell commands, add an allow-rule under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. Cempala will **not** pass `--dangerously-skip-permissions` to get around this — it's on the FR-14 forbidden list, and a `config.toml` that tries to add it is rejected at load time. Which tool agy reaches for isn't always predictable, so a prompt phrased toward file edits ("create the file at …") tends to work where one phrased toward the shell ("run a command to …") gets denied.
 

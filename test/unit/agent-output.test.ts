@@ -7,7 +7,7 @@
 // `result` key — a shape codex never emits.
 
 import { describe, test, expect } from "bun:test";
-import { parseAgentOutput, looksLikeAgentStream, resolveResultText } from "../../src/tools/agent-output.ts";
+import { parseAgentOutput, looksLikeAgentStream, reconcileOutcome } from "../../src/tools/agent-output.ts";
 
 // A faithful codex `--json` transcript, trimmed to the events that matter.
 const CODEX_OK = [
@@ -192,60 +192,103 @@ describe("parseAgentOutput — antigravity JSON", () => {
   });
 });
 
-describe("resolveResultText — stderr is read when there is nothing else to go on", () => {
+describe("reconcileOutcome — stderr is read when there is nothing else to go on", () => {
   // The real stderr line agy writes when headless mode auto-denies a tool.
   const SOFT_DENY = `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.`;
 
-  test("a SUCCESSFUL run with an empty answer still surfaces stderr", () => {
-    // The regression. agy exits 0, says SUCCESS, returns "" — and the only
-    // explanation is on stderr. Gated on failure alone, the caller was told
-    // the work succeeded and given an empty string to read.
-    const out = resolveResultText({ resultText: "", ok: true, readStderr: () => SOFT_DENY });
-    expect(out).toBe(SOFT_DENY);
-    expect(out).toContain("permissions.allow");
+  test("a run that says it produced no output is a FAILURE, whatever its exit code claimed", () => {
+    // The regression codex caught. agy exits 0 and says SUCCESS while
+    // stating on stderr that it deliberately did nothing. Reporting that
+    // as `completed` tells the caller work happened when none did.
+    const r = reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => SOFT_DENY });
+    expect(r.ok).toBe(false);
+    expect(r.exitCode).toBe(1);
+    expect(r.resultText).toContain("permissions.allow");
+  });
+
+  test("an empty answer WITHOUT a did-nothing statement stays successful", () => {
+    // The other half, and the reason the match is narrow: a prompt whose
+    // whole effect is a file edit can legitimately return no prose.
+    // Failing that would be its own misreport.
+    const r = reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => "" });
+    expect(r.ok).toBe(true);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("unrelated stderr chatter does not flip a successful empty run", () => {
+    const r = reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => "downloading model...\nwarming cache" });
+    expect(r.ok).toBe(true);
+    expect(r.resultText).toBe("downloading model...\nwarming cache");
+  });
+
+  test("the marker phrases must be in order and close together, not merely both present", () => {
+    // Two independent regexes over the whole capture would let unrelated
+    // diagnostics combine into a false positive — and a false positive
+    // here fails a run that actually succeeded.
+    const scattered = [
+      "warning: no output produced by the formatter",
+      ...Array.from({ length: 40 }, (_, i) => `step ${i} ok`),
+      "note: a cache write was auto-denied",
+    ].join("\n");
+    expect(reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => scattered }).ok).toBe(true);
+
+    // Reversed order is not the documented sentence either.
+    const reversed = "auto-denied ... then later ... no output produced";
+    expect(reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => reversed }).ok).toBe(true);
+  });
+
+  test("BOTH marker phrases are required to flip the verdict", () => {
+    // Either alone is too weak to fail a run on. A false negative costs
+    // nothing; a false positive fails work that actually succeeded.
+    expect(reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => "no output produced" }).ok).toBe(true);
+    expect(reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => "the request was auto-denied" }).ok).toBe(true);
   });
 
   test("a successful run WITH an answer never reads stderr", () => {
     // Progress chatter on stderr must not be glued onto a good answer.
     let reads = 0;
-    const out = resolveResultText({
+    const r = reconcileOutcome({
       resultText: "PONG",
-      ok: true,
+      exitCode: 0,
       readStderr: () => { reads++; return "downloading model...\nthinking..."; },
     });
-    expect(out).toBe("PONG");
+    expect(r.resultText).toBe("PONG");
+    expect(r.ok).toBe(true);
     expect(reads).toBe(0); // lazily skipped entirely
   });
 
   test("a failed run with an answer appends stderr under a label", () => {
-    const out = resolveResultText({ resultText: "partial work", ok: false, readStderr: () => "boom" });
-    expect(out).toBe("partial work\n\nstderr:\nboom");
+    const r = reconcileOutcome({ resultText: "partial work", exitCode: 7, readStderr: () => "boom" });
+    expect(r.resultText).toBe("partial work\n\nstderr:\nboom");
+    expect(r.exitCode).toBe(7);
+    expect(r.ok).toBe(false);
   });
 
-  test("a failed run with no answer becomes the stderr text", () => {
-    expect(resolveResultText({ resultText: "", ok: false, readStderr: () => "401 unauthorized" }))
-      .toBe("401 unauthorized");
+  test("a failed run with no answer becomes the stderr text, keeping its exit code", () => {
+    const r = reconcileOutcome({ resultText: "", exitCode: 1, readStderr: () => "401 unauthorized" });
+    expect(r.resultText).toBe("401 unauthorized");
+    expect(r.exitCode).toBe(1);
   });
 
   test("empty stderr leaves the result exactly as it was", () => {
-    expect(resolveResultText({ resultText: "", ok: true, readStderr: () => "" })).toBe("");
-    expect(resolveResultText({ resultText: "x", ok: false, readStderr: () => "   \n " })).toBe("x");
+    expect(reconcileOutcome({ resultText: "", exitCode: 0, readStderr: () => "" }).resultText).toBe("");
+    expect(reconcileOutcome({ resultText: "x", exitCode: 1, readStderr: () => "   \n " }).resultText).toBe("x");
   });
 
   test("whitespace-only output counts as empty", () => {
-    // "   \n" is not an answer; it must not block the stderr read.
-    expect(resolveResultText({ resultText: "  \n ", ok: true, readStderr: () => SOFT_DENY }))
-      .toBe(SOFT_DENY);
+    const r = reconcileOutcome({ resultText: "  \n ", exitCode: 0, readStderr: () => SOFT_DENY });
+    expect(r.resultText).toBe(SOFT_DENY);
+    expect(r.ok).toBe(false);
   });
 
-  test("the soft-deny case does NOT become a failure — the verdict is the agent's", () => {
-    // resolveResultText only ever chooses TEXT. A prompt whose whole effect
-    // is a file edit can legitimately return no prose, and inventing a
-    // failure for it would be its own misreport.
+  test("the parser still reports agy's own SUCCESS — only stderr overturns it", () => {
+    // reconcileOutcome is the ONLY place the verdict can flip. The parser
+    // keeps reporting what the envelope said, so the two concerns stay
+    // separable.
     const parsed = parseAgentOutput(JSON.stringify({ status: "SUCCESS", response: "" }));
     expect(parsed.inferredExitCode).toBe(0);
-    expect(resolveResultText({ resultText: parsed.resultText, ok: true, readStderr: () => SOFT_DENY }))
-      .toBe(SOFT_DENY);
+    const settled = reconcileOutcome({ resultText: parsed.resultText, exitCode: 0, readStderr: () => SOFT_DENY });
+    expect(settled.ok).toBe(false);
   });
 });
 

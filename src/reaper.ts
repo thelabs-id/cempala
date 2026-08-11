@@ -19,7 +19,7 @@
 import { readFileSync } from "node:fs";
 import type { DB } from "./db/client.ts";
 import { assessTask, ACTIVITY_GRACE_MS } from "./tools/task-liveness.ts";
-import { resolveResultText } from "./tools/agent-output.ts";
+import { reconcileOutcome } from "./tools/agent-output.ts";
 
 // FR-17's 30-minute window. Derived from the liveness module's activity grace
 // rather than restated, so the age cutoff here and the "has it gone quiet"
@@ -70,29 +70,28 @@ export function sweepStaleTasks(db: DB, now: number = Date.now()): SweepResult {
     // A finished run keeps its real outcome. The sweep exists to stop rows
     // sitting at `running` forever — not to overwrite a success with a
     // failure, which is what blanket-failing every swept row used to do.
-    const status = liveness.state === "finished" && liveness.exitCode === 0 ? "completed" : "failed";
-    // Read the stderr sibling on the same terms dispatch and check_task do
-    // — on failure, and whenever the run came back with nothing to say.
-    // Without it this path was the odd one out: a run whose only
+    // Settle on exactly the terms dispatch and check_task use: read stderr
+    // on failure AND whenever the run came back with nothing to say, and
+    // let an agent's own "I produced no output" statement overturn a zero
+    // exit. Without this the sweep was the odd one out — a run whose only
     // explanation went to stderr (an auth error, or agy's headless
     // permission auto-denial, which exits 0 with an empty answer) was
-    // swept to the canned STALE_RESULT while the two other paths would
-    // have surfaced the actual reason. That contradicted the very parity
-    // the exit_code below is written to preserve.
+    // swept to the canned STALE_RESULT while the other paths surfaced the
+    // real reason. That contradicted the very parity the exit code below
+    // is written to preserve.
     //
-    // STALE_RESULT stays as the last resort, for a row where neither
-    // stream ever said anything.
-    const reconciledText = resolveResultText({
+    // -1 for a run with no verdict is the same "died without saying so"
+    // sentinel the other paths use.
+    const reconciled = reconcileOutcome({
       resultText: liveness.state === "finished" ? liveness.resultText : "",
-      ok: status === "completed",
+      exitCode: liveness.state === "finished" ? liveness.exitCode : -1,
       readStderr: () => readStderrSibling(r.output_file),
     });
-    const result = reconciledText.trim() ? reconciledText : STALE_RESULT;
-    // Persist the exit code too, so a swept row is indistinguishable from one
-    // reconciled by dispatch or check_task. Leaving it NULL made swept rows a
-    // second-class shape for the G2 audit trail. -1 is the same "died without
-    // a verdict" sentinel those two paths use.
-    const exitCode = liveness.state === "finished" ? liveness.exitCode : -1;
+    const status = reconciled.ok ? "completed" : "failed";
+    // STALE_RESULT is the last resort, for a row where neither stream ever
+    // said anything at all.
+    const result = reconciled.resultText.trim() ? reconciled.resultText : STALE_RESULT;
+    const exitCode = reconciled.exitCode;
 
     db.run(
       `UPDATE tasks

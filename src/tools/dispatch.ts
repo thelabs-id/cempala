@@ -32,7 +32,7 @@ import { effectivePathDenylist, matchPromptDenylist, matchAbsolutePathDenylist }
 import { canonicalize } from "../security/paths.ts";
 import { resolveAgentArgv, type AgentId, type NetworkEnforcement } from "./agent-args.ts";
 import { AGENT_IDS } from "../config.ts";
-import { parseAgentOutput, resolveResultText } from "./agent-output.ts";
+import { parseAgentOutput, reconcileOutcome } from "./agent-output.ts";
 import { assessTask, ACTIVITY_GRACE_MS } from "./task-liveness.ts";
 import { spawnDetached, isAlive, makeOutputFile } from "../platform/spawn.ts";
 import type { Result } from "./send-message.ts";
@@ -309,10 +309,13 @@ export async function dispatch(
     // don't want the caller to see an empty result for those.
     const out = readOutputFile(outFile);
     const parsed = parseAgentOutput(out);
-    const { exitCode, ok } = judgeOutcome(outcome.exitCode, parsed.inferredExitCode, handle.pidIsAgent);
-    const finalResult = resolveResultText({
+    const judged = judgeOutcome(outcome.exitCode, parsed.inferredExitCode, handle.pidIsAgent);
+    // reconcileOutcome can still overturn a zero exit — an agent that says
+    // on stderr that it deliberately produced no output did not succeed,
+    // whatever its exit status claimed.
+    const { resultText: finalResult, exitCode, ok } = reconcileOutcome({
       resultText: parsed.resultText,
-      ok,
+      exitCode: judged.exitCode,
       readStderr: () => readOutputFile(handle.stderrFile),
     });
     const finalStatus = ok ? "completed" : "failed";
@@ -382,10 +385,10 @@ function scheduleBackgroundReconcile(
       }
       const out = readOutputFile(outFile);
       const parsed = parseAgentOutput(out);
-      const { exitCode, ok } = judgeOutcome(rawExitCode, parsed.inferredExitCode, handle.pidIsAgent);
-      const resultText = resolveResultText({
+      const judged = judgeOutcome(rawExitCode, parsed.inferredExitCode, handle.pidIsAgent);
+      const { resultText, exitCode, ok } = reconcileOutcome({
         resultText: parsed.resultText,
-        ok,
+        exitCode: judged.exitCode,
         readStderr: () => readOutputFile(handle.stderrFile),
       });
       const finalStatus = ok ? "completed" : "failed";
@@ -454,19 +457,18 @@ function watchOrphanedRun(
       // `pid: null` — the recorded process is gone; only the output can speak.
       const liveness = assessTask({ pid: null, outputFile: outFile });
       if (liveness.state !== "running") {
-        const exitCode =
+        const rawCode =
           liveness.state === "finished"
             ? liveness.exitCode
             : launcherExitCode !== 0
               ? launcherExitCode
               : -1;
-        const ok = exitCode === 0;
-        const resultText = resolveResultText({
+        const { resultText, exitCode, ok } = reconcileOutcome({
           resultText:
             liveness.state === "finished"
               ? liveness.resultText
               : parseAgentOutput(readOutputFile(outFile)).resultText,
-          ok,
+          exitCode: rawCode,
           readStderr: () => readOutputFile(handle.stderrFile),
         });
         db.run(
