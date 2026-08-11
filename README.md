@@ -19,7 +19,7 @@ Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claud
 <img alt="Runtime dependencies: 1" src="https://img.shields.io/badge/runtime%20deps-1-2ea043" />
 </p>
 
-[Install](#install) · [How it works](#how-it-works) · [Tools](#the-8-mcp-tools) · [Trust &amp; safety](#trust--safety-model) · [Configuration](#configuration) · [Development](#development)
+[Install](#install) · [Uninstall](#uninstalling) · [How it works](#how-it-works) · [Tools](#the-8-mcp-tools) · [Trust &amp; safety](#trust--safety-model) · [Configuration](#configuration) · [Development](#development)
 
 <sub>Part of the <b>theLabs</b> product family, alongside Dalang, Kayon, and Gamelan.</sub>
 
@@ -46,7 +46,7 @@ Cempala gives each agent two complementary ways to hand off work, backed by one 
 - **`dispatch` (synchronous).** Shells out to the target agent's headless CLI (`codex exec`, `claude -p`, `agy -p`), waits (bounded timeout), and returns the result inline in the same turn. You wait once; both do the work.
 - **Mailbox (asynchronous).** `send_message` / `check_messages` and `create_task` -> `claim_task` -> `complete_task` leave work in a shared queue for the other agent to claim when it's ready. Nothing is lost if a job runs long.
 
-Every `dispatch` also writes a task row, so the synchronous and mailbox paths share one audit log. Because it speaks standard MCP, any compatible agent can join later without server changes.
+Every valid `dispatch` writes a task row before any policy check runs, so the synchronous and mailbox paths share one audit log. (A call rejected for malformed arguments returns before the row is written.) Because it speaks standard MCP, any compatible agent can call these tools and take part in the mailbox — agent identities are created on first use. Becoming a `dispatch` *target* is the narrower case: that needs the agent's headless flags mapped in `agent-args.ts`, so it's a code change rather than configuration.
 
 ## Highlights
 
@@ -54,8 +54,8 @@ Every `dispatch` also writes a task row, so the synchronous and mailbox paths sh
 - **Shared task queue.** Or leave it for the other agent to pick up later.
 - **Plain-language requests.** No commands or config to learn.
 - **Complete audit log.** Every handoff records the request, the folder it ran in, how long it took, and how it ended.
-- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installing also registers cempala with each agent CLI, and [`uninstall.sh`](#uninstalling) undoes all of it.
-- **Honest network control.** Handoffs run offline by default, and each result reports exactly what was enforced.
+- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installing also registers cempala with each agent CLI, and the [uninstaller](#uninstalling) removes those registrations and the binary (your data stays unless you ask for it to go).
+- **Honest network control.** Handoffs *ask* for no network by default, and every result that got as far as spawning reports what was actually enforced — including admitting when the request could not be enforced at all.
 
 ## Requirements
 
@@ -109,7 +109,7 @@ Both installers:
 - detect OS + arch and download the matching pre-compiled binary
 - verify a SHA-256 checksum before doing anything with the file
 - drop the binary into `~/.cempala/bin` — the same place on every platform (`%USERPROFILE%\.cempala\bin` on Windows), deliberately **not** under `AppData`, which some agent clients cannot see from the processes they spawn
-- add it to `PATH` for the current shell **and** for future shells — on Windows via the user `PATH` variable; on macOS and Linux by writing to the startup file your shell actually reads (see below)
+- put it on `PATH` for future shells — on Windows by updating the user `PATH` variable (and the current PowerShell process); on macOS and Linux by writing to the startup file your shell actually reads (see below). **Open a new shell afterwards**: a script piped into `bash` runs in a child process, so it cannot change the `PATH` of the shell you launched it from
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
 - register with Antigravity by merging an entry into `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json` on Windows), which covers both the Antigravity IDE and the `agy` CLI. Antigravity has no `mcp add` subcommand, so this is a JSON edit rather than a CLI call — it preserves every other server and top-level key already in that file, and if the file can't be parsed it's left untouched and the exact snippet is printed for you to paste. You can re-run just this step with `cempala --register-antigravity`.
@@ -136,13 +136,15 @@ irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uninstall.
 
 **Deleting `~/.cempala/` on its own is not enough**, which is why this exists. Installing writes to four places, and three of them are other programs' config files: the install directory, your shell's `PATH`, an MCP registration in Claude Code and Codex each, and an entry in Antigravity's `mcp_config.json`. Remove only the directory and those three registrations survive, each pointing at a binary that no longer exists — so every launch of every agent CLI reports cempala as a failed server, indefinitely, until you find and edit three config files by hand.
 
-The uninstaller undoes all four:
+The uninstaller removes the registrations, the `PATH` entry and the executable, and by default keeps everything *else* under `~/.cempala/` — your config, database and audit log:
 
 - **Registrations** go through each CLI's own `mcp remove`, so their config files stay theirs to edit. Only Antigravity, which ships no such command, is edited directly — one key removed, every other server and setting left exactly as it was, and the file never deleted, because it's Antigravity's rather than ours.
 - **The `PATH` export** is removed only where the marker comment the installer wrote is still present. A block someone has edited, a commented-out copy, or a file that merely mentions the same path is left alone — and your line endings and a missing final newline are preserved. Install then uninstall returns a startup file to its original bytes.
-- **Your data is kept.** `~/.cempala/` holds the task history and the audit log; that's a record, not installation debris, and uninstalling the software isn't an instruction to discard it. Pass `--purge` (`-Purge` on Windows) to remove it too.
+- **Your data is kept.** `~/.cempala/` holds the config, the task history and the audit log; that's a record, not installation debris, and uninstalling the software isn't an instruction to discard it. Only the binary is removed from it — and on Windows, if that binary is still open, it is renamed aside to `cempala.exe.old-…` for you to delete once the session holding it closes. Pass `--purge` (`-Purge` on Windows) to delete the whole directory.
 
-`--dry-run` prints exactly what would happen and changes nothing.
+**A step that can't be completed is reported as a failure, not smoothed over.** If a registration won't come out, an rc file can't be written, or the installed binary is too old to know these flags, the run prints what to finish by hand, exits non-zero under a `PARTIALLY uninstalled` banner, and *keeps the binary* — it's the only thing that can retry. When any of that happens *before* the purge step, `--purge` is refused outright, so a half-undone system doesn't also lose its database. (A failure during the deletion itself is different: by then some of the directory may already be gone. That is reported too, but it cannot be undone.)
+
+`--dry-run` prints the actions it would take and changes nothing. It doesn't invoke the agent CLIs at all, so it shows what would be attempted rather than predicting whether each step would succeed.
 
 ## The 8 MCP tools
 
@@ -153,11 +155,13 @@ The uninstaller undoes all four:
 | `create_task` | Create a mailbox task; validates `cwd` against the trust boundary. | FR-3 |
 | `claim_task` | Claim a pending task; fails for non-`pending` states. | FR-4 |
 | `complete_task` | Mark a claimed/running task `completed` or `failed`. | FR-5 |
-| `dispatch` | Synchronously run a prompt in the target agent's CLI; returns the result or `running` at the wait timeout. `needs_approval` results carry a `reason` (`"outside_home"` or `"ancestor_of_denylist"`) so the caller can tell "approve this path" from "narrow the cwd". | FR-6 |
+| `dispatch` | Synchronously run a prompt in the target agent's CLI — `target_agent` is `"claude"`, `"codex"` or `"antigravity"`. Returns the result, or `running` at the wait timeout. A `completed`, `failed` or `running` result carries `network_enforcement`, saying what was actually applied. `needs_approval` results carry a `reason` (`"outside_home"` or `"ancestor_of_denylist"`) so the caller can tell "approve this path" from "narrow the cwd". | FR-6 |
 | `check_task` | Read current task state; reconciles a `running` task whose process has died. | FR-7 |
 | `approve_path` | Persist a path outside the home into `approved_paths`. Denylisted paths cannot be approved. | FR-7a |
 
-Every call is logged to `audit_log` with timing, args, and a short result summary. A reaper (FR-17) runs on every tool call and clears `running` tasks that are over 30 minutes old and no longer live, recording what actually happened — `completed` when the captured output shows the agent finished its turn, `failed` otherwise. A dead process ID on its own is deliberately not treated as a failed task: on Windows the agent CLIs run behind a launcher shim, so the recorded PID can die while the agent works on and finishes.
+Every call is logged to `audit_log` with timing, args, and a short result summary. A reaper (FR-17) runs on every tool call and clears `running` tasks that are over 30 minutes old and no longer live, recording what actually happened rather than blanket-failing them. A dead process ID on its own is deliberately not treated as a failed task: on Windows the agent CLIs run behind a launcher shim, so the recorded PID can die while the agent works on and finishes.
+
+**Five code paths settle a task** — `dispatch`'s in-wait branch, its background reconcile, its orphan watcher, `check_task` and the reaper — and they all apply one rule, in one function, because near-copies of it had drifted before. A run's `stderr` is read whenever it failed *or* came back with nothing to say, since an empty answer is exactly when stderr is the only thing that can explain the outcome. And an agent that states on stderr that it deliberately produced no output is recorded as `failed`, whatever its exit code claimed — that isn't cempala inventing a verdict, it's reading one the CLI gave in prose instead of in its JSON.
 
 ## Trust & safety model
 
@@ -167,7 +171,7 @@ Every call is logged to `audit_log` with timing, args, and a short result summar
 - **Cwd that is a strict ancestor of a denylist root** (e.g. `cwd: "~"`, which contains `~/.ssh` as a subpath) also returns `needs_approval`, with `reason: "ancestor_of_denylist"`. The escalation here is *not* `approve_path`; the home directory cannot be approved as a whole, so `canApprove` rejects it. Instead you **narrow the cwd** to a project subdirectory. This is symmetric to the "denylist wins" rule: a cwd broad enough to contain a denylist subpath would let the child reach it, so the trust boundary forces explicit human confirmation rather than silently allowing the broad scope.
 - **Even `approve_path`** refuses denylisted paths and their ancestors. No escalation path lets a denylisted path become approved. (AC-10)
 - **Path containment** uses one canonicalization routine (resolve symlinks, absolutize, normalize, Windows case-fold, then `X === Y || X.startsWith(Y + sep)`). Sibling-prefix matches like `D:\clients\acme2` against root `D:\clients\acme` are excluded. (AC-11)
-- **Symlinks inside an approved directory** that point at `~/.ssh` are still caught, because the canonicalization resolves the symlink before matching. (AC-12)
+- **A `cwd` that reaches a denylisted root through a symlink** is still denied, because canonicalization resolves it before matching — so pointing a symlink at `~/.ssh` and dispatching into it does not get past the check. Note the scope: cempala validates the `cwd` it is given. It does not scan the tree below an approved directory, and it cannot stop an already-running agent from following a symlink it finds there. (AC-12)
 - **Sandbox scope** is set per agent CLI per dispatch:
   - Codex: `--sandbox workspace-write` (with `-c sandbox_workspace_write.network_access=true` only when `allow_network: true`). Egress is **OS-sandbox-enforced**.
   - Claude: `--tools "<baseline + WebFetch + WebSearch if allow_network>"`, plus `--disallowedTools "WebFetch,WebSearch"` only when `allow_network: false`. The web tools are removed, but Claude's `Bash` can still `curl`, so the dispatch result reports this honestly as `network_enforcement: "tools_only"` rather than the stronger `"sandboxed"` (which only Codex gets).
@@ -186,7 +190,7 @@ So the baseline passes `--add-dir <the validated cwd>`. The flag stays forbidden
 
 ### What `allow_network` actually buys you, per agent
 
-Every `dispatch` result carries a `network_enforcement` field. It describes what was *applied*, not what was *asked for*:
+A `dispatch` that reached the point of spawning — a `completed`, `failed` or `running` result — carries a `network_enforcement` field. It describes what was *applied*, not what was *asked for*:
 
 | Agent | `allow_network: false` | `allow_network: true` |
 |---|---|---|
@@ -260,12 +264,13 @@ The agent id is `antigravity` even though the binary is `agy` — that's the nam
 
 ```sh
 bun install
-bun run src/index.ts        # run the server (for manual testing)
-bun test                    # unit tests
-CEMPALA_INTEGRATION=1 bun test test/integration   # spawns real codex + claude + agy
-bash scripts/test-install.sh                      # installer tests
-bun x tsc --noEmit          # typecheck
-bun build --compile src/index.ts --outfile dist/cempala.exe
+bun run start               # run the server (for manual testing)
+bun run typecheck           # tsc --noEmit
+bun run test                # unit tests (bun test test/unit)
+bun run test:install        # installer tests
+bun run test:uninstall      # uninstaller tests
+bun run test:integration    # spawns real codex + claude + agy
+bun run build               # compile a binary for this platform
 ```
 
 Build all six release targets, with a `checksums.txt` the installers can verify against:
@@ -284,26 +289,34 @@ bash scripts/smoke-test.sh dist/cempala-linux-x64
 
 That drives the real MCP protocol — handshake, `tools/list`, and a message round-tripped through SQLite — rather than just checking `--version`, since "the binary starts" isn't the interesting failure mode. It runs in a temp `HOME`, so it never touches your real `~/.cempala`.
 
-The installer is the one piece the Bun suite can't reach, and it's also the first thing every user runs, so it has its own suite:
+The installers are the one piece the Bun suite can't reach, and they're also the first and last thing every user runs, so they have suites of their own:
 
 ```sh
 bash scripts/test-install.sh
 ```
 
-It drives the real `install.sh` against a stubbed `curl` and stub agent CLIs in a throwaway `HOME`, and runs every case under `/bin/bash` as well as the bash on your `PATH`. Running it under the *oldest* bash you support is the point, not a detail: macOS still ships bash 3.2, which is what `curl … | bash` gets there, and it differs from any bash you're likely to have locally — an empty array expanded under `set -u` is an error rather than nothing. CI runs this on macOS as well as Linux for exactly that reason.
+```sh
+bash scripts/test-uninstall.sh
+```
 
-`.github/workflows/verify.yml` runs the suite on Linux, macOS and Windows, runs the installer tests on Linux and macOS, and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
+Both drive the real scripts in a throwaway `HOME` with stub agent CLIs — `test-install.sh` against a stubbed `curl` and a release fixture, `test-uninstall.sh` against a *real compiled* cempala, since the uninstaller delegates its two delicate steps to the binary and a stub would prove almost nothing. Both run every case under `/bin/bash` as well as the bash on your `PATH`. Running them under the *oldest* bash you support is the point, not a detail: macOS still ships bash 3.2, which is what `curl … | bash` gets there, and it differs from any bash you're likely to have locally — an empty array expanded under `set -u` is an error rather than nothing. CI runs both on macOS as well as Linux for exactly that reason.
+
+The uninstaller suite leans hardest on the failure modes, because those are the ones that quietly do damage: an unwritable rc file, a CLI whose `mcp remove` fails, a config it can't parse, a binary too old to know the flags. Each asserts the non-zero exit and the partial-uninstall banner, plus binary retention where a retry needs it; the purge-after-failure cases additionally assert that the database survives. A cleanup that can't finish must never look like one that did.
+
+`.github/workflows/verify.yml` runs the unit suite on Linux, macOS and Windows, both installer suites on Linux and macOS, and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
 
 ## Architecture
 
-- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--register-antigravity`, `--version`, `--help`; otherwise starts the stdio MCP server.
-- `src/register-antigravity.ts`: the `mcp_config.json` merge. Lives in the binary rather than in the two installers, because a correct JSON merge in bash means depending on `jq` or `python3`, and writing it twice — once in bash, once in PowerShell — is two implementations of one rule.
+- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--register-antigravity`, `--unregister-antigravity`, `--remove-path-block`, `--version`, `--help`; otherwise starts the stdio MCP server.
+- `src/register-antigravity.ts`: the `mcp_config.json` merge, and its inverse. Lives in the binary rather than in the two installers, because a correct JSON merge in bash means depending on `jq` or `python3`, and writing it twice — once in bash, once in PowerShell — is two implementations of one rule. Takes an advisory lock, verifies the file hasn't changed since it was read, and backs up before writing.
+- `src/uninstall-path-block.ts`: removes the `PATH` block `install.sh` writes. Here rather than in `uninstall.sh` for the same reason — except that this block is *written* in bash, so the writer and the remover genuinely are in two languages. They cannot share code: `install.sh` is fetched over the network and executed directly, so it has no sibling files to source. A unit test reads `install.sh` and asserts the marker and body constants still match, and that assertion is the only thing keeping the two in step.
 - `src/db/`: raw SQL schema + `bun:sqlite` client. No ORM.
 - `src/security/`: the ONLY path comparator (`paths.ts`), the ONLY trust-boundary decider (`trust-boundary.ts`), the ONLY denylist compiler (`denylist.ts`). Tool handlers consume these; they never re-derive.
 - `src/platform/`: `paths.ts` for OS-correct filesystem locations, `spawn.ts` for the cross-platform detached spawn + PID liveness wrapper.
-- `src/tools/`: one file per tool. Always returns `{ok, data} | {ok: false, error, code}`. `needs_approval` is `ok: true` with `data.status === "needs_approval"`, not a failure.
+- `src/tools/`: one handler file per MCP tool, plus the shared helpers they lean on — `agent-args.ts` for the spawn argv, `agent-output.ts` for parsing what an agent wrote and settling its outcome, `task-liveness.ts` for deciding whether a run is still going. Handlers always return `{ok, data} | {ok: false, error, code}`; `needs_approval` is `ok: true` with `data.status === "needs_approval"`, not a failure.
 - `src/reaper.ts`: FR-17, the stale running-task sweep, piggybacked on every tool call.
 - `src/audit.ts`: FR-8, the append-only `audit_log` writer.
+- `scripts/`: `install.sh` / `install.ps1` and `uninstall.sh` / `uninstall.ps1`, each pair self-contained so it can be run straight from a URL; `build-all.sh` for the six release targets; `smoke-test.sh` for the per-platform check CI runs against release binaries; and `test-install.sh` / `test-uninstall.sh`, the suites for the two scripts Bun can't reach.
 
 ## The name
 

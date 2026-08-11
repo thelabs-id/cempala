@@ -225,7 +225,9 @@ export PATH=\"\$HOME/somewhere/else:\$PATH\"
   printf '#!/bin/sh\necho "cempala 0.1.0"\n' > "$FAKE_HOME/.cempala/bin/cempala"
   chmod +x "$FAKE_HOME/.cempala/bin/cempala"
   run_uninstall --purge
+  assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
   assert_contains "says it did not purge" "$out" "NOT purging"
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
   if [ -f "$FAKE_HOME/.cempala/cempala.db" ]; then
     pass "the database survived"
   else
@@ -238,6 +240,8 @@ export PATH=\"\$HOME/somewhere/else:\$PATH\"
   run_uninstall
   assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
   # It must not claim to have kept a binary that was never there.
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
+  assert_not_contains "does NOT claim success" "$out" "✓ cempala uninstalled."
   assert_not_contains "does not claim a missing binary was kept" "$out" "The binary was kept"
   assert_contains "explains it must be finished by hand" "$out" "by hand"
 
@@ -314,6 +318,8 @@ STUB
   run_uninstall --purge
   assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
   assert_contains "says it did not purge" "$out" "NOT purging"
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
+  assert_not_contains "does NOT claim success" "$out" "✓ cempala uninstalled."
   if [ -f "$FAKE_HOME/.cempala/cempala.db" ]; then
     pass "the database survived a failed purge"
   else
