@@ -188,9 +188,10 @@ make_asset() {
 #                       script (needed to test replacing a RUNNING binary —
 #                       see the note in that case)
 #   checksum_mode       ok | mismatch | missing
-#   have_claude         1/0    have_codex 1/0
+#   have_claude         1/0    have_codex 1/0    have_opencode 1/0
 #   claude_mode         ok | exists | other
 #   codex_mode          ok | exists | other
+#   opencode_mode       ok | exists | other
 #
 # After the run:
 #   out                 merged stdout+stderr
@@ -239,7 +240,7 @@ CURL
 
   # Stub agent CLIs. Each records its argv and consults its own mode.
   local cli
-  for cli in claude codex; do
+  for cli in claude codex opencode; do
     cat > "$work/stub/$cli" <<CLI
 #!/bin/sh
 name=$cli
@@ -269,6 +270,7 @@ CLI
 
   [ "$have_claude" = "1" ] || rm -f "$work/stub/claude"
   [ "$have_codex"  = "1" ] || rm -f "$work/stub/codex"
+  [ "$have_opencode" = "1" ] || rm -f "$work/stub/opencode"
 }
 
 run_installer() {
@@ -279,7 +281,8 @@ run_installer() {
 
   # A deliberately minimal PATH: the stubs plus base system tools only. If the
   # developer has a real claude or codex installed, it must not be reachable,
-  # or the "not found" cases would silently test nothing.
+  # or the "not found" cases would silently test nothing. The same applies to
+  # opencode, which many developers working on this repo do have installed.
   out=$(
     env -i \
       HOME="$home_dir" \
@@ -290,6 +293,7 @@ run_installer() {
       CEMPALA_TEST_LOG="$work/log" \
       CEMPALA_TEST_CLAUDE_MODE="$claude_mode" \
       CEMPALA_TEST_CODEX_MODE="$codex_mode" \
+      CEMPALA_TEST_OPENCODE_MODE="$opencode_mode" \
       "$current_shell" "$installer" 2>&1
   )
   rc=$?
@@ -313,8 +317,10 @@ begin_case() {
   checksum_mode="ok"
   have_claude=1
   have_codex=1
+  have_opencode=1
   claude_mode="ok"
   codex_mode="ok"
+  opencode_mode="ok"
   cempala_mode="ok"
 }
 
@@ -341,6 +347,51 @@ run_all_cases() {
   assert_eq "codex argv (no --scope)" \
     "$(cat "$work/log/codex")" \
     "[mcp][add][cempala][--][${home_dir:-$work/home}/.cempala/bin/cempala]"
+  assert_contains "opencode registered" "$out" "✓ opencode mcp add succeeded"
+  assert_eq "opencode argv (same shape as codex)" \
+    "$(cat "$work/log/opencode")" \
+    "[mcp][add][cempala][--][${home_dir:-$work/home}/.cempala/bin/cempala]"
+  teardown
+
+  # 1a. OpenCode used to be the one agent the installer deliberately left
+  #     alone, so the case that matters is the absence of that exception:
+  #     it is registered on the same terms as the others, and skipped with
+  #     a manual hint when the CLI is not there — not skipped silently.
+  begin_case "opencode absent — prints the manual command, install still succeeds"
+  have_opencode=0
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "says it was not found" "$out" "opencode not found on PATH"
+  assert_contains "prints the exact command" "$out" \
+    "opencode mcp add cempala -- \"${home_dir:-$work/home}/.cempala/bin/cempala\""
+  assert_contains "closing banner printed" "$out" "✓ cempala installed."
+  teardown
+
+  # 1a-ii. `opencode mcp add` updates an existing entry in place and exits 0,
+  #        so re-running the installer must not go anywhere near the
+  #        remove-and-retry path — there is no `opencode mcp remove` to fall
+  #        back to, and calling it would print a yargs help page as an error.
+  begin_case "re-running the installer re-registers opencode without a remove"
+  setup_world
+  run_installer
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "still succeeds" "$out" "✓ opencode mcp add succeeded"
+  assert_not_contains "never called mcp remove" "$(cat "$work/log/opencode")" "[mcp][remove]"
+  teardown
+
+  # 1a-iii. opencode_mode was plumbed through with no case exercising it,
+  #         so a failing `opencode mcp add` was never actually tested.
+  begin_case "opencode mcp add fails — reported, install still succeeds"
+  opencode_mode="other"
+  setup_world
+  run_installer
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "the failure is reported" "$out" "opencode mcp add failed"
+  assert_contains "prints the command to retry" "$out" "opencode mcp add cempala --"
+  # A registration that did not take must not stop the rest of the install.
+  assert_contains "closing banner printed" "$out" "✓ cempala installed."
   teardown
 
   # 1b. Antigravity has no `mcp add`, so it is registered by calling back

@@ -48,7 +48,7 @@ Cempala gives each agent two complementary ways to hand off work, backed by one 
 
 Every valid `dispatch` writes a task row before any policy check runs, so the synchronous and mailbox paths share one audit log. (A call rejected for malformed arguments returns before the row is written.) Because it speaks standard MCP, any compatible agent can call these tools and take part in the mailbox — agent identities are created on first use. Becoming a `dispatch` *target* is the narrower case: that needs the agent's headless flags mapped in `agent-args.ts`, so it's a code change rather than configuration.
 
-For OpenCode, these directions are independent: add Cempala as an MCP server when you want **OpenCode to call Cempala**; make sure the `opencode` CLI is installed and configured with a working provider when you want **Cempala to dispatch work to OpenCode**. You can do either or both.
+For OpenCode, these directions are independent. The installer registers Cempala as an MCP server when the `opencode` CLI is on `PATH`, which is what lets **OpenCode call Cempala**; for **Cempala to dispatch work to OpenCode**, that CLI also needs a working provider configured. Either direction works without the other.
 
 ## Highlights
 
@@ -56,7 +56,7 @@ For OpenCode, these directions are independent: add Cempala as an MCP server whe
 - **Shared task queue.** Or leave it for the other agent to pick up later.
 - **Plain-language requests.** No commands or config to learn.
 - **Complete audit log.** Every MCP tool call is logged; each task and dispatch records the request, folder, duration, and outcome.
-- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installation registers Claude, Codex, and Antigravity when available, while OpenCode setup stays explicit and manual. The [uninstaller](#uninstalling) removes the registrations it created and the binary (your data stays unless you ask for it to go).
+- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installation registers Claude, Codex, Antigravity, and OpenCode when available. The [uninstaller](#uninstalling) removes the registrations it created and the binary (your data stays unless you ask for it to go).
 - **Honest network control.** Handoffs *ask* for no network by default, and every result that got as far as spawning reports what was actually enforced — including admitting when the request could not be enforced at all.
 
 ## Requirements
@@ -118,13 +118,22 @@ Both installers:
 - drop the binary into `~/.cempala/bin` — the same place on every platform (`%USERPROFILE%\.cempala\bin` on Windows), deliberately **not** under `AppData`, which some agent clients cannot see from the processes they spawn
 - put it on `PATH` for future shells — on Windows by updating the user `PATH` variable (and the current PowerShell process); on macOS and Linux by writing to the startup file your shell actually reads (see below). **Open a new shell afterwards**: a script piped into `bash` runs in a child process, so it cannot change the `PATH` of the shell you launched it from
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
-- auto-register with `claude` and/or `codex` MCP if found on `PATH`
+- auto-register with `claude`, `codex` and/or `opencode` MCP if found on `PATH`, using each CLI's own `mcp add`. For OpenCode that writes `~/.config/opencode/opencode.jsonc` (or an `opencode.json` already there), keeping the comments and other servers in it intact — letting the CLI edit its own config is why that file survives the round trip unchanged
 - register with Antigravity by merging an entry into `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json` on Windows), which covers both the Antigravity IDE and the `agy` CLI. Antigravity has no `mcp add` subcommand, so this is a JSON edit rather than a CLI call — it preserves every other server and top-level key already in that file, and if the file can't be parsed it's left untouched and the exact snippet is printed for you to paste. You can re-run just this step with `cempala --register-antigravity`.
-- leave OpenCode configuration untouched; follow the explicit setup below if you want OpenCode to call Cempala.
+
+Each installer is idempotent, so re-running one to upgrade re-points every registration at the new binary rather than duplicating it.
 
 ### OpenCode MCP setup
 
-OpenCode can use all Cempala tools as a standard local MCP server. Add this to your global `~/.config/opencode/opencode.json` (or a project-root `opencode.json`) and restart OpenCode:
+OpenCode can use all Cempala tools as a standard local MCP server, and the installer sets that up for you whenever the `opencode` CLI is on `PATH` — the same as Claude Code and Codex. **Restart OpenCode afterwards**, then check it with `opencode mcp list`.
+
+It registers by running the CLI's own command:
+
+```sh
+opencode mcp add cempala -- /absolute/path/to/cempala
+```
+
+which leaves this in `~/.config/opencode/opencode.jsonc` (or in an `opencode.json` you already had):
 
 ```jsonc
 {
@@ -132,20 +141,15 @@ OpenCode can use all Cempala tools as a standard local MCP server. Add this to y
   "mcp": {
     "cempala": {
       "type": "local",
-      "command": ["/absolute/path/to/cempala"],
-      "enabled": true
+      "command": ["/absolute/path/to/cempala"]
     }
   }
 }
 ```
 
-Use the exact executable path printed by the installer—normally `~/.cempala/bin/cempala` (or `%USERPROFILE%\.cempala\bin\cempala.exe` on Windows). OpenCode's equivalent non-interactive registration command is:
+Run that command yourself if you install the `opencode` CLI later, using the exact executable path the installer printed — normally `~/.cempala/bin/cempala`, or `%USERPROFILE%\.cempala\bin\cempala.exe` on Windows. A project-root `opencode.json` works too if you want Cempala in one project rather than globally; the installer only ever touches the global file.
 
-```sh
-opencode mcp add cempala -- /absolute/path/to/cempala
-```
-
-Check the connection with `opencode mcp list`. Cempala intentionally leaves OpenCode configuration under your control, so installation and uninstall do not add, change, or remove this entry.
+Letting `opencode mcp add` do the writing is deliberate: OpenCode's config is JSONC, and its own CLI is the thing that knows how to add an entry without discarding your comments or reformatting the rest. Uninstalling has to edit that file directly — OpenCode ships no `mcp remove` — so it cuts out the one entry and copies every other byte through unchanged.
 
 To send work *to* OpenCode, no MCP entry is needed: install the `opencode` CLI, configure a working provider, then dispatch with `target_agent: "opencode"`. Cempala runs `opencode run --format json`, retains its JSONL output with the task, and returns the final response. The default model comes from your OpenCode configuration; set `[agents.opencode].model` in Cempala's config when a dispatch must use a specific configured provider/model.
 
@@ -169,12 +173,13 @@ curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uni
 irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uninstall.ps1 | iex
 ```
 
-**Deleting `~/.cempala/` on its own is not enough**, which is why this exists. The installer can write its own install directory and `PATH` entry, plus registrations in Claude Code, Codex, and Antigravity when those clients are available. Remove only the directory and any registrations it made can survive, pointing at a binary that no longer exists — so an affected agent can report Cempala as a failed server until you remove the stale entry. If you completed the optional OpenCode setup above, remove the `mcp.cempala` entry from that OpenCode configuration too; Cempala deliberately does not edit it.
+**Deleting `~/.cempala/` on its own is not enough**, which is why this exists. The installer can write its own install directory and `PATH` entry, plus registrations in Claude Code, Codex, Antigravity, and OpenCode when those clients are available. Remove only the directory and any registrations it made can survive, pointing at a binary that no longer exists — so an affected agent can report Cempala as a failed server until you remove the stale entry. The uninstaller removes all four. A project-root `opencode.json` you wrote yourself is the one exception: the installer never added that, so it does not come out either.
 
 The uninstaller removes the registrations it can manage, the `PATH` entry and the executable, and by default keeps everything *else* under `~/.cempala/` — your config, database and audit log:
 
-- **Registrations** go through each CLI's own `mcp remove`, so their config files stay theirs to edit. Only Antigravity, which ships no such command, is edited directly — one key removed, every other server and setting left exactly as it was, and the file never deleted, because it's Antigravity's rather than ours.
+- **Registrations** go through each CLI's own `mcp remove`, so their config files stay theirs to edit. Antigravity and OpenCode ship no such command, so those two are edited directly — one key removed from each, every other server and setting left exactly as it was, and neither file ever deleted, because they're that agent's rather than ours.
 - **The `PATH` export** is removed only where the marker comment the installer wrote is still present. A block someone has edited, a commented-out copy, or a file that merely mentions the same path is left alone — and your line endings and a missing final newline are preserved. Install then uninstall returns a startup file to its original bytes.
+- **The OpenCode entry is cut out, not rewritten around.** OpenCode has no `mcp remove`, so `cempala --unregister-opencode` edits the config itself — every global file OpenCode reads, which is `opencode.json`, `opencode.jsonc` and the legacy `config.json` it still loads but no longer writes: it deletes the one `mcp.cempala` member and copies every other byte through, comments and indentation included. Install then uninstall returns that file to its original bytes, the same standard the shell startup files are held to. A config it cannot parse is left untouched and reported instead.
 - **Your data is kept.** `~/.cempala/` holds the config, the task history and the audit log; that's a record, not installation debris, and uninstalling the software isn't an instruction to discard it. Only the binary is removed from it — and on Windows, if that binary is still open, it is renamed aside to `cempala.exe.old-…` for you to delete once the session holding it closes. Pass `--purge` (`-Purge` on Windows) to delete the whole directory.
 
 **A step that can't be completed is reported as a failure, not smoothed over.** If a registration won't come out, an rc file can't be written, or the installed binary is too old to know these flags, the run prints what to finish by hand, exits non-zero under a `PARTIALLY uninstalled` banner, and *keeps the binary* — it's the only thing that can retry. When any of that happens *before* the purge step, `--purge` (`-Purge` on Windows) is refused outright, so a half-undone system doesn't also lose its database. (A failure during the deletion itself is different: by then some of the directory may already be gone. That is reported too, but it cannot be undone.)
@@ -353,7 +358,8 @@ The uninstaller suite leans hardest on the failure modes, because those are the 
 
 ## Architecture
 
-- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--register-antigravity`, `--unregister-antigravity`, `--remove-path-block`, `--version`, `--help`; otherwise starts the stdio MCP server.
+- `src/index.ts`: MCP server entrypoint. Handles `--init`, `--register-antigravity`, `--unregister-antigravity`, `--unregister-opencode`, `--remove-path-block`, `--version`, `--help`; otherwise starts the stdio MCP server.
+- `src/register-opencode.ts`: the *removal* half of the OpenCode registration, and only that half. Adding is `opencode mcp add`, which is non-interactive, idempotent, and comment-preserving — when a CLI ships a working subcommand, using it beats reimplementing it. There is no `opencode mcp remove`, so this is a byte-level cut through the JSONC rather than a parse-and-reserialise: reserialising would strip the comments the installer was careful to keep. Refuses anything it cannot scan confidently.
 - `src/register-antigravity.ts`: the `mcp_config.json` merge, and its inverse. Lives in the binary rather than in the two installers, because a correct JSON merge in bash means depending on `jq` or `python3`, and writing it twice — once in bash, once in PowerShell — is two implementations of one rule. Takes an advisory lock, verifies the file hasn't changed since it was read, and backs up before writing.
 - `src/uninstall-path-block.ts`: removes the `PATH` block `install.sh` writes. Here rather than in `uninstall.sh` for the same reason — except that this block is *written* in bash, so the writer and the remover genuinely are in two languages. They cannot share code: `install.sh` is fetched over the network and executed directly, so it has no sibling files to source. A unit test reads `install.sh` and asserts the marker and body constants still match, and that assertion is the only thing keeping the two in step.
 - `src/db/`: raw SQL schema + `bun:sqlite` client. No ORM.

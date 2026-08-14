@@ -59,13 +59,14 @@ RC_MARKER='# cempala installer — added by install.sh'
 
 # setup_world — a throwaway HOME that looks like a real install.
 #
-# $have_binary, $rc_contents and $ag_contents are set by each case before
-# calling this.
+# $have_binary, $rc_contents, $ag_contents and $oc_contents are set by each
+# case before calling this.
 setup_world() {
   cleanup_work
   work=$(mktemp -d)
   export FAKE_HOME="$work/home"
-  mkdir -p "$FAKE_HOME/.cempala/bin" "$FAKE_HOME/.gemini/config" "$work/stub" "$work/log"
+  mkdir -p "$FAKE_HOME/.cempala/bin" "$FAKE_HOME/.gemini/config" \
+           "$FAKE_HOME/.config/opencode" "$work/stub" "$work/log"
 
   if [ "${have_binary:-1}" = "1" ]; then
     cp "$real_bin" "$FAKE_HOME/.cempala/bin/cempala"
@@ -78,6 +79,20 @@ setup_world() {
 
   printf '%s' "${rc_contents:-}" > "$FAKE_HOME/.zshrc"
   printf '%s' "${ag_contents:-}" > "$FAKE_HOME/.gemini/config/mcp_config.json"
+
+  # OpenCode's config is only created when a case asks for one: "no config
+  # at all" is the common real state and has its own expected message.
+  #
+  # Cleared once used, unlike the knobs above, because it is the only one
+  # cases do NOT all set explicitly — and a stale value here is not an
+  # inert fixture. It plants a live cempala registration in a case that
+  # believes nothing is installed, which the uninstaller then correctly
+  # reports as a failed cleanup, failing an assertion that was right all
+  # along.
+  if [ -n "${oc_contents:-}" ]; then
+    printf '%s' "$oc_contents" > "$FAKE_HOME/.config/opencode/opencode.jsonc"
+    oc_contents=""
+  fi
 
   # Stub agent CLIs that record their argv. `mcp remove` succeeds; anything
   # else is irrelevant here.
@@ -94,7 +109,12 @@ STUB
 
 # run_uninstall [args...] — run the script under one bash, capture output.
 run_uninstall() {
-  out=$(HOME="$FAKE_HOME" PATH="$work/stub:/usr/bin:/bin:/usr/sbin:/sbin" \
+  # XDG_CONFIG_HOME is unset rather than inherited: it is what decides
+  # where OpenCode's config lives, for uninstall.sh AND for the binary it
+  # calls, so a developer who has it set would otherwise send these cases
+  # looking at their own real config.
+  out=$(env -u XDG_CONFIG_HOME \
+        HOME="$FAKE_HOME" PATH="$work/stub:/usr/bin:/bin:/usr/sbin:/sbin" \
         "$bash_bin" "$repo_root/scripts/uninstall.sh" "$@" 2>&1)
   rc=$?
 }
@@ -124,10 +144,21 @@ AG_WITH_CEMPALA='{
 }
 '
 
+OC_WITH_CEMPALA='{
+  // hand-written, and it stays that way
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "tokyonight",
+  "mcp": {
+    "sqlite-explorer": { "type": "local", "command": ["node"] },
+    "cempala": { "type": "local", "command": ["/home/x/.cempala/bin/cempala"] }
+  }
+}
+'
+
 run_all_cases() {
   # --- the happy path ------------------------------------------------------
-  echo "  case: full uninstall removes all four, keeps data"
-  have_binary=1 rc_contents="$INSTALLED_RC" ag_contents="$AG_WITH_CEMPALA"
+  echo "  case: full uninstall removes all five, keeps data"
+  have_binary=1 rc_contents="$INSTALLED_RC" ag_contents="$AG_WITH_CEMPALA" oc_contents="$OC_WITH_CEMPALA"
   setup_world; run_uninstall
   assert_eq "exit status" "$rc" "0"
   assert_contains "reports success" "$out" "✓ cempala uninstalled."
@@ -135,6 +166,11 @@ run_all_cases() {
   assert_not_contains "cempala gone from the antigravity config" "$(cat "$FAKE_HOME/.gemini/config/mcp_config.json")" '"cempala"'
   assert_contains "the other server survived" "$(cat "$FAKE_HOME/.gemini/config/mcp_config.json")" "sqlite-explorer"
   assert_contains "unrelated settings survived" "$(cat "$FAKE_HOME/.gemini/config/mcp_config.json")" "keepMe"
+  oc_after=$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")
+  assert_not_contains "cempala gone from the opencode config" "$oc_after" '"cempala"'
+  assert_contains "the other opencode server survived" "$oc_after" "sqlite-explorer"
+  assert_contains "the user's comment survived" "$oc_after" "hand-written, and it stays that way"
+  assert_contains "unrelated opencode settings survived" "$oc_after" "tokyonight"
   assert_contains "claude was asked to remove" "$(cat "$work/log/claude")" "[mcp][remove][cempala][--scope][user]"
   assert_contains "codex was asked to remove" "$(cat "$work/log/codex")" "[mcp][remove][cempala]"
   if [ -f "$FAKE_HOME/.cempala/bin/cempala" ]; then fail "binary removed"; else pass "binary removed"; fi
@@ -256,6 +292,95 @@ export PATH=\"\$HOME/somewhere/else:\$PATH\"
   run_uninstall
   if [ -L "$FAKE_HOME/.zshrc" ]; then pass "still a symlink"; else fail "still a symlink"; fi
   assert_eq "the dotfiles file itself was edited" "$(cat "$FAKE_HOME/dotfiles/zshrc")" "$(printf '%s' "$CLEAN_RC")"
+
+  # --- OpenCode ------------------------------------------------------------
+  #
+  # OpenCode is the newest of the four registrations and the only one the
+  # installer adds through a CLI it cannot also use to remove, so these
+  # cases exist to prove the removal half really is covered.
+
+  echo "  case: no opencode config at all is not a failure"
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}' oc_contents=""
+  setup_world
+  run_uninstall
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "says there was nothing to remove" "$out" "not registered in"
+  assert_contains "reports success" "$out" "✓ cempala uninstalled."
+
+  echo "  case: an opencode config without cempala is left byte-identical"
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}'
+  oc_contents='{
+  // someone else entirely
+  "mcp": { "other": { "type": "local", "command": ["/usr/bin/other"] } }
+}
+'
+  setup_world
+  before_oc=$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")
+  run_uninstall
+  assert_eq "exit status" "$rc" "0"
+  assert_eq "left byte-identical" "$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")" "$before_oc"
+
+  echo "  case: an unparseable opencode config is refused, and that is a FAILURE"
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}'
+  oc_contents='{ "mcp": { "cempala": { "command": '
+  setup_world
+  before_oc=$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")
+  run_uninstall
+  assert_eq "left byte-identical" "$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")" "$before_oc"
+  assert_contains "names the file to fix" "$out" "opencode.jsonc"
+  # Same rule as Antigravity: a removal we declined is live configuration
+  # left behind, so the run must not end under a success banner.
+  assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
+  assert_eq "the binary was kept so the step can be retried" \
+    "$([ -f "$FAKE_HOME/.cempala/bin/cempala" ] && echo yes || echo no)" "yes"
+
+  echo "  case: one clean config and one unparseable legacy config"
+  # Decides whether the .some() over per-file outcomes in index.ts is right:
+  # the clean file must still be cleaned, and the run must still fail.
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}' oc_contents="$OC_WITH_CEMPALA"
+  setup_world
+  printf '%s' '{ "mcp": { "cempala": ' > "$FAKE_HOME/.config/opencode/config.json"
+  run_uninstall
+  assert_not_contains "the parseable config was still cleaned" \
+    "$(cat "$FAKE_HOME/.config/opencode/opencode.jsonc")" '"cempala"'
+  assert_eq "the malformed one is untouched" \
+    "$(cat "$FAKE_HOME/.config/opencode/config.json")" '{ "mcp": { "cempala": '
+  assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
+
+  echo "  case: a malformed config with no cempala in it does NOT fail the uninstall"
+  # Two of the three files cempala never writes, so a user's broken legacy
+  # config must not turn a clean uninstall into a partial one.
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}' oc_contents=""
+  setup_world
+  printf '%s' '{ "theme": [[[ }' > "$FAKE_HOME/.config/opencode/config.json"
+  run_uninstall
+  assert_eq "exit status" "$rc" "0"
+  assert_contains "reports success" "$out" "✓ cempala uninstalled."
+
+  echo "  case: a binary too old to know --unregister-opencode reports it as a failure"
+  # The upgrade path that actually happens: uninstall.sh is fetched from
+  # main while the installed binary predates the flag. It must not silently
+  # skip the step and delete the binary that was the only way to do it.
+  have_binary=1 rc_contents="$CLEAN_RC" ag_contents='{"mcpServers":{}}' oc_contents="$OC_WITH_CEMPALA"
+  setup_world
+  cat > "$FAKE_HOME/.cempala/bin/cempala" <<'OLD'
+#!/bin/sh
+# An older cempala: --help lists no opencode flag, and an unknown flag is
+# not rejected — it would start the MCP server and read stdin.
+if [ "$1" = "--help" ]; then
+  echo "  cempala --unregister-antigravity"
+  exit 0
+fi
+exit 0
+OLD
+  chmod +x "$FAKE_HOME/.cempala/bin/cempala"
+  run_uninstall
+  assert_contains "says the build cannot do it" "$out" "cannot unregister itself from OpenCode"
+  assert_contains "names the file" "$out" "opencode.jsonc"
+  assert_eq "exit status is non-zero" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+  assert_contains "says it was partial" "$out" "PARTIALLY uninstalled"
 
   # --- an unparseable antigravity config -----------------------------------
   echo "  case: an unparseable antigravity config is refused, and that is a FAILURE"

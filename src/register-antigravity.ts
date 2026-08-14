@@ -324,7 +324,16 @@ export function unregisterFromAntigravity(opts: { configPath?: string } = {}): U
   if (!existsSync(path)) return { kind: "absent", path };
 
   const lock = acquireLock(path);
-  if (!lock) return { kind: "manual", path, reason: lockFailureReason(path), snippet };
+  // The remedy is THIS command, not the registration default. Unregistering
+  // is the one path where the default is exactly backwards.
+  if (!lock) {
+    return {
+      kind: "manual",
+      path,
+      reason: lockFailureReason(path, "cempala --unregister-antigravity"),
+      snippet,
+    };
+  }
 
   try {
     let text: string;
@@ -445,7 +454,25 @@ class WriteFailedError extends Error {
   }
 }
 
-function writeBackPreservingLinks(path: string, contents: string, expected: string): void {
+// Exported for src/register-opencode.ts, which needs the identical
+// guarantees — verify-then-write, backup, symlinks written *through* — on a
+// different config file. Copying it would be a second implementation of the
+// one rule this file opens by insisting on.
+export function writeBackPreservingLinks(
+  path: string,
+  contents: string,
+  expected: string,
+  // How to tell a config that is fine from one our failed write damaged.
+  //
+  // A PARAMETER, because the answer is per-format and getting it wrong
+  // inverts the guarantee below. `JSON.parse` is right for Antigravity's
+  // strict-JSON file and wrong for OpenCode's JSONC: a config with a
+  // comment in it fails that parse, so every foreign write would look
+  // like damage and be overwritten — the precise outcome the re-read is
+  // there to prevent, disabled for exactly the file shape that motivated
+  // this feature.
+  isValid: (text: string) => boolean = isParseableJson,
+): void {
   // VERIFY FIRST, before anything is copied or truncated.
   //
   // The ordering is the whole point. An earlier version did this check
@@ -503,7 +530,7 @@ function writeBackPreservingLinks(path: string, contents: string, expected: stri
     let restored = false;
     try {
       const damaged = readFileSync(path, "utf-8");
-      if (!isParseableJson(damaged) && readFileSync(path, "utf-8") === damaged) {
+      if (!isValid(damaged) && readFileSync(path, "utf-8") === damaged) {
         copyFileSync(backup, path);
         restored = true;
       }
@@ -541,7 +568,11 @@ function writeBackPreservingLinks(path: string, contents: string, expected: stri
  * else, and one that does not means we were never able to make it. The
  * distinction matters because it changes what the user should do.
  */
-function lockFailureReason(path: string): string {
+export function lockFailureReason(path: string, retryCommand = "cempala --register-antigravity"): string {
+  // The remedy is a parameter because this is shared with the OpenCode
+  // path, where the one actionable instruction in the message pointed at
+  // the wrong tool AND the opposite direction — telling someone whose
+  // uninstall just half-failed to go and register.
   const lockPath = `${path}.cempala-lock`;
   if (existsSync(lockPath)) {
     // Deliberately not "another process is registering right now". A lock
@@ -549,7 +580,7 @@ function lockFailureReason(path: string): string {
     // holder, a stale one in a directory we cannot delete from, or an
     // unrelated file at that name. Naming what was observed, and what to
     // do about it, beats asserting a live process we cannot see.
-    return `a lock file at ${lockPath} is in the way — either another cempala is registering right now, or an interrupted one left it behind. Nothing was written; re-run \`cempala --register-antigravity\`, and delete that file if it persists`;
+    return `a lock file at ${lockPath} is in the way — either another cempala is working on that file right now, or an interrupted one left it behind. Nothing was written; re-run \`${retryCommand}\`, and delete that file if it persists`;
   }
   return `could not create a lock file next to ${path} (the directory may not be writable); nothing was written`;
 }

@@ -2,26 +2,27 @@
 # scripts/uninstall.sh — cempala uninstaller for macOS / Linux
 #
 # The counterpart to install.sh, and it exists because deleting
-# `~/.cempala/` was never enough. The installer writes to four places, and
-# three of them are other programs' config files:
+# `~/.cempala/` was never enough. The installer writes to five places, and
+# four of them are other programs' config files:
 #
 #   1. ~/.cempala/            the binary, the config, the database
 #   2. a shell startup file   the PATH export
 #   3. Claude Code and Codex  an MCP server registration each
 #   4. Antigravity            an entry in ~/.gemini/config/mcp_config.json
+#   5. OpenCode               an entry in ~/.config/opencode/opencode.json[c]
 #
-# Remove only (1) and the three registrations survive, each pointing at a
+# Remove only (1) and the four registrations survive, each pointing at a
 # binary that no longer exists — so every launch of every agent CLI reports
 # cempala as a failed server, indefinitely, and the user has to go find
-# three config files to stop it. Undoing an install has to undo all four.
+# four config files to stop it. Undoing an install has to undo all five.
 #
 # Two rules shape everything below:
 #
 #   - Registrations are removed with each CLI's OWN tool (`claude mcp
 #     remove`, `codex mcp remove`) so their config files stay theirs to
-#     edit. Only Antigravity, which ships no such command, is edited
-#     directly — by the binary, which removes one key and leaves the rest
-#     of the file alone.
+#     edit. Antigravity and OpenCode ship no such command, so those two are
+#     edited directly — by the binary, which removes one key from each and
+#     leaves the rest of the file alone.
 #
 #   - YOUR DATA IS KEPT unless you ask for it to go. `~/.cempala/` holds
 #     the task history and the audit log; that is a record, not
@@ -153,7 +154,53 @@ else
   say "  ✓ cempala was not registered with Antigravity"
 fi
 
-# --- 3. Strip the PATH export from the shell startup files -------------------
+# --- 3. Unregister from OpenCode --------------------------------------------
+#
+# The installer registers OpenCode with the CLI's own `opencode mcp add`,
+# but there is no `opencode mcp remove` to undo it — `mcp` offers add, list,
+# auth, logout and debug, and nothing else. So this half goes through the
+# binary, like Antigravity's, and for the same non-negotiable reason: a
+# registration we add automatically is one we must be able to take away.
+#
+# Three filenames are checked in the fallback. `opencode mcp add` writes to
+# an existing `opencode.json` and otherwise creates `opencode.jsonc`, so
+# which of those holds the entry depends on what was on disk at install
+# time — and `config.json` is a legacy name OpenCode no longer writes but
+# still loads, so an entry left there is just as live as the others.
+oc_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+if [ -x "$bin" ] && "$bin" --help </dev/null 2>/dev/null | grep -q -- "--unregister-opencode"; then
+  if [ "$dry_run" = "1" ]; then
+    echo "    would run: $bin --unregister-opencode"
+  else
+    if ! "$bin" --unregister-opencode </dev/null; then
+      cleanup_failed=1
+      say "  ! opencode unregistration failed; edit the config in $oc_dir by hand"
+    fi
+  fi
+else
+  oc_found=""
+  for oc_config in "${oc_dir}/opencode.json" "${oc_dir}/opencode.jsonc" "${oc_dir}/config.json"; do
+    if [ -f "$oc_config" ] && grep -q '"cempala"' "$oc_config" 2>/dev/null; then
+      oc_found="${oc_found}${oc_config}
+"
+    fi
+  done
+  if [ -n "$oc_found" ]; then
+    # Live configuration left behind, exactly as in the Antigravity case:
+    # a failed cleanup, not a footnote, so the run cannot end under a
+    # success banner or go on to purge the database.
+    cleanup_failed=1
+    say "  ! this cempala build cannot unregister itself from OpenCode."
+    say "    Remove the \"cempala\" entry from \"mcp\" in:"
+    printf '%s' "$oc_found" | while IFS= read -r oc_config; do
+      [ -n "$oc_config" ] && say "      $oc_config"
+    done
+  else
+    say "  ✓ cempala was not registered with OpenCode"
+  fi
+fi
+
+# --- 4. Strip the PATH export from the shell startup files -------------------
 #
 # Every file install.sh has ever written to is offered, not just the ones
 # it writes to today — someone uninstalling may have installed under an
@@ -211,7 +258,7 @@ else
   for f in "${existing_rc[@]}"; do say "      $f"; done
 fi
 
-# --- 4. The install directory ------------------------------------------------
+# --- 5. The install directory ------------------------------------------------
 echo
 if [ "$purge" = "1" ] && [ "$cleanup_failed" = "1" ]; then
   # PURGE IS SKIPPED when a step failed, and this ordering is the point.

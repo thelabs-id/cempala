@@ -11,8 +11,8 @@
 #      AND [Environment]::SetEnvironmentVariable("PATH", ..., "User") for
 #      persistence across future sessions.
 #   5. Run cempala --init to write the default config if absent.
-#   6. Detect claude / codex, run matching mcp add for each; print the
-#      manual command for each not found. Antigravity has no `mcp add`, so
+#   6. Detect claude / codex / opencode, run matching mcp add for each; print
+#      the manual command for each not found. Antigravity has no `mcp add`, so
 #      `cempala --register-antigravity` merges the entry into
 #      %USERPROFILE%\.gemini\config\mcp_config.json instead.
 
@@ -274,6 +274,17 @@ try {
   Register-Agent -Name "codex"  -AddArgs @("mcp", "add", "cempala", "--", $dest) `
                                 -RemoveArgs @("mcp", "remove", "cempala")
 
+  # OpenCode's `mcp add` takes the same form and is idempotent -- it updates
+  # an existing entry in place and exits 0, so the "already exists" retry
+  # inside Register-Agent never fires for it. -RemoveArgs is passed only to
+  # satisfy that retry path; `opencode mcp remove` does not exist, which is
+  # also why the uninstaller calls `cempala --unregister-opencode` instead.
+  #
+  # Letting the CLI write the file is the point: OpenCode's config is JSONC,
+  # and `opencode mcp add` keeps its comments and other servers intact.
+  Register-Agent -Name "opencode" -AddArgs @("mcp", "add", "cempala", "--", $dest) `
+                                  -RemoveArgs @("mcp", "remove", "cempala")
+
   # Antigravity has no `mcp add` subcommand -- `agy --help` lists agent,
   # changelog, help, install, models, plugin and update, and the docs say to
   # edit %USERPROFILE%\.gemini\config\mcp_config.json directly. cempala does
@@ -294,9 +305,9 @@ try {
   Write-Host "[ok] cempala installed."
   Write-Host ""
   Write-Host "Next steps:"
-  Write-Host "  - RESTART any Claude Code, Codex or Antigravity session that is already"
-  Write-Host "    open, so it picks up the registration. Until you do, it will show"
-  Write-Host "    cempala as failed."
+  Write-Host "  - RESTART any Claude Code, Codex, Antigravity or OpenCode session that is"
+  Write-Host "    already open, so it picks up the registration. Until you do, it will"
+  Write-Host "    show cempala as failed."
   Write-Host "  - Then run '<cli> mcp list' to confirm cempala is connected (in"
   Write-Host "    Antigravity, type '/mcp' in the prompt, or check Settings ->"
   Write-Host "    Installed MCP Servers)."

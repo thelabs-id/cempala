@@ -107,6 +107,26 @@ if (ARGS.includes("--unregister-antigravity")) {
   process.exit(outcome.kind === "manual" ? 1 : 0);
 }
 
+// `--unregister-opencode` — used by the uninstaller.
+//
+// There is no matching `--register-opencode`: OpenCode ships a working,
+// idempotent `opencode mcp add`, so the installers use it the same way they
+// use `claude mcp add`. It ships no `mcp remove`, which is why only this
+// half lives here. See src/register-opencode.ts.
+if (ARGS.includes("--unregister-opencode")) {
+  const { unregisterFromOpenCode, describeUnregisterOutcome } = await import("./register-opencode.ts");
+  // One outcome per config file: OpenCode has two possible filenames and
+  // an entry can genuinely be in either.
+  const outcomes = unregisterFromOpenCode();
+  for (const outcome of outcomes) {
+    process.stdout.write(`${describeUnregisterOutcome(outcome).join("\n")}\n`);
+  }
+  // Non-zero if ANY file could not be cleaned, for the reason spelled out
+  // on --unregister-antigravity above: the uninstaller reads this status to
+  // decide whether it is safe to delete the binary.
+  process.exit(outcomes.some((o) => o.kind === "manual") ? 1 : 0);
+}
+
 // `--remove-path-block <rc-file>...` — used by the uninstaller.
 //
 // The removal rule lives in the binary rather than in uninstall.sh because
@@ -174,6 +194,12 @@ function usage(): string {
     "  cempala --unregister-antigravity",
     "                    remove only cempala's entry from that file, leaving",
     "                    every other server and setting untouched.",
+    "",
+    "  cempala --unregister-opencode",
+    "                    remove only cempala's entry from OpenCode's global",
+    "                    config (~/.config/opencode/opencode.json[c]), keeping",
+    "                    the file's comments and every other server. Registering",
+    "                    has no flag here — the installer runs `opencode mcp add`.",
     "",
     "  cempala --remove-path-block <rc-file>...",
     "                    strip the PATH export the installer added to a shell",

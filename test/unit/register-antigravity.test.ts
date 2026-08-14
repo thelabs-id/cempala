@@ -234,6 +234,21 @@ describe("registerWithAntigravity — failure leaves nothing broken behind", () 
       expect(o.reason).not.toContain("not be writable");
     }
   }, { timeout: 15_000 });
+
+  test("a locked UNregistration tells the user to re-run the unregister command", () => {
+    // The remedy defaulted to `--register-antigravity` for both directions,
+    // so the one actionable line a blocked uninstall printed sent the user
+    // to register instead. The uninstaller has already exited non-zero and
+    // kept the binary by then, making this the only instruction they get.
+    write(JSON.stringify({ mcpServers: { [SERVER_KEY]: { command: BIN } } }));
+    writeFileSync(`${cfgPath}.cempala-lock`, "someone-else", "utf-8");
+    const o = unregisterFromAntigravity({ configPath: cfgPath });
+    expect(o.kind).toBe("manual");
+    if (o.kind === "manual") {
+      expect(o.reason).toContain("--unregister-antigravity");
+      expect(o.reason).not.toContain("re-run `cempala --register-antigravity`");
+    }
+  }, { timeout: 15_000 });
 });
 
 describe("registerWithAntigravity — locking and concurrent writers", () => {

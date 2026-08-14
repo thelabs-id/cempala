@@ -2,20 +2,22 @@
 #
 # The counterpart to install.ps1, and the reason it exists is the same as on
 # Unix: deleting the install directory was never enough. The installer writes
-# to four places, and three of them are other programs' config files:
+# to five places, and four of them are other programs' config files:
 #
 #   1. %USERPROFILE%\.cempala\   the binary, the config, the database
 #   2. the user PATH variable    the bin directory
 #   3. Claude Code and Codex     an MCP server registration each
 #   4. Antigravity               an entry in .gemini\config\mcp_config.json
+#   5. OpenCode                  an entry in .config\opencode\opencode.json[c]
 #
-# Remove only (1) and the three registrations survive, each pointing at a
+# Remove only (1) and the four registrations survive, each pointing at a
 # binary that is gone -- so every launch of every agent CLI reports cempala
-# as a failed server until the user hunts down three config files.
+# as a failed server until the user hunts down four config files.
 #
 # Registrations are removed with each CLI's OWN tool so their config files
-# stay theirs. Only Antigravity, which ships no such command, is edited
-# directly -- by the binary, which removes one key and leaves the rest alone.
+# stay theirs. Antigravity and OpenCode ship no such command, so those two
+# are edited directly -- by the binary, which removes one key from each and
+# leaves the rest alone.
 #
 # YOUR DATA IS KEPT unless you ask for it to go: .cempala holds the task
 # history and audit log, which is a record rather than installation debris.
@@ -135,7 +137,63 @@ if ($canUnregister) {
   Write-Host "  [ok] cempala was not registered with Antigravity"
 }
 
-# --- 3. Remove the bin directory from the user PATH -------------------------
+# --- 3. Unregister from OpenCode --------------------------------------------
+#
+# The installer registers OpenCode through its own `opencode mcp add`, but
+# there is no `opencode mcp remove` to undo it, so this half goes through
+# the binary like Antigravity's. Registering automatically without being
+# able to unregister is the failure this script exists to prevent.
+#
+# Three filenames are checked in the fallback: `opencode mcp add` writes to
+# an existing opencode.json and otherwise creates opencode.jsonc, and
+# config.json is a legacy name OpenCode still loads.
+# $env:USERPROFILE, NOT $HOME. Windows PowerShell 5.1 builds $HOME from
+# HOMEDRIVE+HOMEPATH, which on a domain or roaming profile is a network
+# share -- while the binary resolves its own paths through os.homedir(),
+# which reads USERPROFILE. Disagreeing here would send the fallback to
+# scan the wrong directory, find nothing, print "not registered", and let
+# the run delete the binary with a live entry still on disk: a false
+# success in the one branch that exists to catch this.
+$ocDir = if ($env:XDG_CONFIG_HOME) {
+  Join-Path $env:XDG_CONFIG_HOME "opencode"
+} else {
+  Join-Path $env:USERPROFILE ".config\opencode"
+}
+$canUnregisterOc = $false
+if (Test-Path $bin) {
+  $help = Invoke-Cli -Exe $bin -CliArgs @("--help")
+  $canUnregisterOc = $help.Output -match "--unregister-opencode"
+}
+if ($canUnregisterOc) {
+  if ($DryRun) {
+    Write-Host "    would run: $bin --unregister-opencode"
+  } else {
+    $r = Invoke-Cli -Exe $bin -CliArgs @("--unregister-opencode")
+    if ($r.Output) { Write-Host $r.Output }
+    if ($r.ExitCode -ne 0) {
+      $cleanupFailed = $true
+      Write-Host "  ! opencode unregistration failed; edit the config in $ocDir by hand"
+    }
+  }
+} else {
+  $ocLeft = @()
+  foreach ($name in @("opencode.json", "opencode.jsonc", "config.json")) {
+    $ocConfig = Join-Path $ocDir $name
+    if ((Test-Path $ocConfig) -and (Select-String -Path $ocConfig -Pattern '"cempala"' -Quiet)) {
+      $ocLeft += $ocConfig
+    }
+  }
+  if ($ocLeft.Count -gt 0) {
+    $cleanupFailed = $true
+    Write-Host "  ! this cempala build cannot unregister itself from OpenCode."
+    Write-Host "    Remove the `"cempala`" entry from `"mcp`" in:"
+    foreach ($ocConfig in $ocLeft) { Write-Host "      $ocConfig" }
+  } else {
+    Write-Host "  [ok] cempala was not registered with OpenCode"
+  }
+}
+
+# --- 4. Remove the bin directory from the user PATH -------------------------
 #
 # Only our own entry is dropped, matched exactly, and the rest of PATH is
 # written back in its original order. PATH is shared with every other
@@ -176,7 +234,7 @@ if ([string]::IsNullOrEmpty($userPath)) {
   }
 }
 
-# --- 4. The legacy install location -------------------------------------------
+# --- 5. The legacy install location -------------------------------------------
 #
 # install.ps1 cleans up %LOCALAPPDATA%\Cempala\bin, which is where the
 # original builds put the binary. Someone uninstalling may never have run
@@ -201,7 +259,7 @@ if ($env:LOCALAPPDATA) {
   }
 }
 
-# --- 5. The install directory --------------------------------------------------
+# --- 6. The install directory --------------------------------------------------
 Write-Host ""
 if ($Purge -and $cleanupFailed) {
   # PURGE IS SKIPPED when a step failed. -Purge deletes the binary along

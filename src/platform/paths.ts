@@ -46,6 +46,43 @@ export const DEFAULT_CONFIG_PATH = join(CEMPALA_HOME_DIR, "config.toml");
  */
 export const ANTIGRAVITY_MCP_CONFIG_PATH = join(homedir(), ".gemini", "config", "mcp_config.json");
 
+/**
+ * OpenCode's global config directory: `$XDG_CONFIG_HOME/opencode`, falling
+ * back to `~/.config/opencode`.
+ *
+ * `~/.config` on every platform, Windows included — OpenCode reads the XDG
+ * location there too rather than `%APPDATA%`, so this is deliberately not
+ * branched on `process.platform`.
+ */
+export function openCodeConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  return join(xdg && xdg.length > 0 ? xdg : join(homedir(), ".config"), "opencode");
+}
+
+/**
+ * Every global config file OpenCode will READ an MCP entry out of.
+ *
+ * Used for unregistration, and the list is deliberately wider than the one
+ * file `opencode mcp add` would write today. `mcp add` picks an existing
+ * `opencode.json` and otherwise creates `opencode.jsonc`; `config.json` is
+ * a legacy name it no longer writes but still loads — verified against
+ * OpenCode 1.18.15, where a server defined only in `config.json` shows up
+ * connected in `opencode mcp list`.
+ *
+ * Removal has to cover all three, because what matters is where the entry
+ * IS, not where we would put it now: a config written by hand or by an
+ * older OpenCode is still live, and cleaning only the file we favour today
+ * leaves a registration pointing at a binary the uninstaller just deleted.
+ */
+export function openCodeConfigCandidates(): string[] {
+  const dir = openCodeConfigDir();
+  return [
+    join(dir, "opencode.json"),
+    join(dir, "opencode.jsonc"),
+    join(dir, "config.json"),
+  ];
+}
+
 /** Where the Windows installer drops the binary (separate from state). */
 export const WINDOWS_BIN_DIR = process.env.LOCALAPPDATA
   ? join(process.env.LOCALAPPDATA, "Cempala", "bin")
