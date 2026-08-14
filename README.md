@@ -21,7 +21,7 @@ Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claud
 
 [Install](#install) · [Uninstall](#uninstalling) · [How it works](#how-it-works) · [Tools](#the-8-mcp-tools) · [Trust &amp; safety](#trust--safety-model) · [Configuration](#configuration) · [Development](#development)
 
-<sub>Part of the <b>theLabs</b> product family, alongside Dalang, Kayon, and Gamelan.</sub>
+<sub>Part of the <b>theLabs</b> product family, alongside Dalang and Kayon.</sub>
 
 </div>
 
@@ -48,20 +48,22 @@ Cempala gives each agent two complementary ways to hand off work, backed by one 
 
 Every valid `dispatch` writes a task row before any policy check runs, so the synchronous and mailbox paths share one audit log. (A call rejected for malformed arguments returns before the row is written.) Because it speaks standard MCP, any compatible agent can call these tools and take part in the mailbox — agent identities are created on first use. Becoming a `dispatch` *target* is the narrower case: that needs the agent's headless flags mapped in `agent-args.ts`, so it's a code change rather than configuration.
 
+For OpenCode, these directions are independent: add Cempala as an MCP server when you want **OpenCode to call Cempala**; make sure the `opencode` CLI is installed and configured with a working provider when you want **Cempala to dispatch work to OpenCode**. You can do either or both.
+
 ## Highlights
 
 - **Instant handoff.** Delegate now, get the result back in the same reply.
 - **Shared task queue.** Or leave it for the other agent to pick up later.
 - **Plain-language requests.** No commands or config to learn.
-- **Complete audit log.** Every handoff records the request, the folder it ran in, how long it took, and how it ended.
-- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installing also registers cempala with each agent CLI, and the [uninstaller](#uninstalling) removes those registrations and the binary (your data stays unless you ask for it to go).
+- **Complete audit log.** Every MCP tool call is logged; each task and dispatch records the request, folder, duration, and outcome.
+- **Local-first.** No account, no server to sign into, no open port. Your data lives in `~/.cempala/`; installation registers Claude, Codex, and Antigravity when available, while OpenCode setup stays explicit and manual. The [uninstaller](#uninstalling) removes the registrations it created and the binary (your data stays unless you ask for it to go).
 - **Honest network control.** Handoffs *ask* for no network by default, and every result that got as far as spawning reports what was actually enforced — including admitting when the request could not be enforced at all.
 
 ## Requirements
 
 - **Bun** is not needed — the installer ships a self-contained binary.
 - **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`), [Codex](https://developers.openai.com/codex/cli) (`codex`), [Antigravity](https://antigravity.google/docs/cli) (`agy`), and/or [OpenCode](https://opencode.ai) (`opencode`). Install more than one to hand work in either direction.
-- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to the installed agent CLIs and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
+- **Each CLI must be ready for non-interactive use.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to the installed agent CLIs and lets each one use its own credentials or provider configuration. If a CLI session has expired or its provider is unavailable, handoffs to that agent fail, often with an authentication or provider error such as `401`.
 
 Check before you start:
 
@@ -81,7 +83,7 @@ agy -p "reply with OK"
 opencode run "reply with OK"
 ```
 
-If any of them prints an authentication error instead of `OK`, sign that CLI in and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem. An unauthenticated `agy` is distinctive: it waits 60 seconds for a sign-in that a headless dispatch can never complete, then returns `authentication failed or timed out`.
+If any of them prints an authentication or provider error instead of `OK`, refresh that CLI's sign-in or provider configuration and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem. An unauthenticated `agy` is distinctive: it waits 60 seconds for a sign-in that a headless dispatch can never complete, then returns `authentication failed or timed out`.
 
 ## Install
 
@@ -97,30 +99,32 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/install.ps1 | iex
 ```
 
-| Platform | Asset | Verified on |
+| Platform | Asset | Validation |
 |---|---|---|
 | Linux x64 | `cempala-linux-x64` | Linux 6.6 and a CI x64 runner |
 | Linux arm64 | `cempala-linux-arm64` | a real ARM64 CI runner |
 | macOS Apple Silicon | `cempala-darwin-arm64` | macOS 15 arm64 |
 | macOS Intel | `cempala-darwin-x64` | macOS 15 x86_64 |
 | Windows x64 | `cempala-windows-x64.exe` | Windows 11 |
+| Windows ARM64 (manual) | `cempala-windows-arm64.exe` | Built, but not yet smoke-tested on Windows ARM hardware |
 
-A target isn't published until the binary has actually been *run* on the platform it targets — a cross-compile that succeeds proves nothing about the artifact. `scripts/smoke-test.sh` is that check, and CI runs it against the exact binaries attached to the release.
+Every binary selected by an installer has been *run* on the platform it targets — a cross-compile that succeeds proves nothing about the artifact. `scripts/smoke-test.sh` is that check, and CI runs it against each installer-selected build artifact on matching hardware. The separately attached Windows ARM64 build is not selected by the installer and remains experimental until matching-hardware smoke coverage exists.
 
-On **Windows on ARM** the installer fetches the x64 build, which runs under emulation. A native `windows-arm64` binary compiles but isn't published, because there was no ARM64 Windows machine to run it on.
+On **Windows on ARM** the installer fetches the tested x64 build, which runs under emulation. A native `windows-arm64` binary is available as a manual, experimental release asset, but it is not installer-selected until it has passed a matching-hardware smoke test.
 
 Both installers:
-- detect OS + arch and download the matching pre-compiled binary
+- detect OS + architecture and download a supported pre-compiled binary
 - verify a SHA-256 checksum before doing anything with the file
 - drop the binary into `~/.cempala/bin` — the same place on every platform (`%USERPROFILE%\.cempala\bin` on Windows), deliberately **not** under `AppData`, which some agent clients cannot see from the processes they spawn
 - put it on `PATH` for future shells — on Windows by updating the user `PATH` variable (and the current PowerShell process); on macOS and Linux by writing to the startup file your shell actually reads (see below). **Open a new shell afterwards**: a script piped into `bash` runs in a child process, so it cannot change the `PATH` of the shell you launched it from
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
 - register with Antigravity by merging an entry into `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json` on Windows), which covers both the Antigravity IDE and the `agy` CLI. Antigravity has no `mcp add` subcommand, so this is a JSON edit rather than a CLI call — it preserves every other server and top-level key already in that file, and if the file can't be parsed it's left untouched and the exact snippet is printed for you to paste. You can re-run just this step with `cempala --register-antigravity`.
+- leave OpenCode configuration untouched; follow the explicit setup below if you want OpenCode to call Cempala.
 
 ### OpenCode MCP setup
 
-OpenCode can use all Cempala tools as a standard local MCP server. Add this to your global `~/.config/opencode/opencode.json` (or a project `opencode.json`) and restart OpenCode:
+OpenCode can use all Cempala tools as a standard local MCP server. Add this to your global `~/.config/opencode/opencode.json` (or a project-root `opencode.json`) and restart OpenCode:
 
 ```jsonc
 {
@@ -141,7 +145,9 @@ Use the exact executable path printed by the installer—normally `~/.cempala/bi
 opencode mcp add cempala -- /absolute/path/to/cempala
 ```
 
-Check the connection with `opencode mcp list`. Cempala does not rewrite an OpenCode configuration automatically because OpenCode has no matching `mcp remove` command; the explicit entry keeps installation and removal reversible without Cempala editing configuration it does not own.
+Check the connection with `opencode mcp list`. Cempala intentionally leaves OpenCode configuration under your control, so installation and uninstall do not add, change, or remove this entry.
+
+To send work *to* OpenCode, no MCP entry is needed: install the `opencode` CLI, configure a working provider, then dispatch with `target_agent: "opencode"`. Cempala runs `opencode run --format json`, retains its JSONL output with the task, and returns the final response. The default model comes from your OpenCode configuration; set `[agents.opencode].model` in Cempala's config when a dispatch must use a specific configured provider/model.
 
 On macOS and Linux "the file your shell actually reads" is `~/.zshrc` for zsh. For bash it's *two* files — a login one (`~/.bash_profile`, or whichever of `~/.bash_login` / `~/.profile` you already use) **and** `~/.bashrc` — because bash reads a different file depending on whether the shell is a login shell, and which one your terminal opens varies by platform. Picking one means being wrong for a lot of people. The snippet is guarded, so being read from both adds the directory to `PATH` exactly once.
 
@@ -163,17 +169,17 @@ curl -fsSL https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uni
 irm https://raw.githubusercontent.com/thelabs-id/cempala/main/scripts/uninstall.ps1 | iex
 ```
 
-**Deleting `~/.cempala/` on its own is not enough**, which is why this exists. Installing writes to four places, and three of them are other programs' config files: the install directory, your shell's `PATH`, an MCP registration in Claude Code and Codex each, and an entry in Antigravity's `mcp_config.json`. Remove only the directory and those three registrations survive, each pointing at a binary that no longer exists — so every launch of every agent CLI reports cempala as a failed server, indefinitely, until you find and edit three config files by hand.
+**Deleting `~/.cempala/` on its own is not enough**, which is why this exists. The installer can write its own install directory and `PATH` entry, plus registrations in Claude Code, Codex, and Antigravity when those clients are available. Remove only the directory and any registrations it made can survive, pointing at a binary that no longer exists — so an affected agent can report Cempala as a failed server until you remove the stale entry. If you completed the optional OpenCode setup above, remove the `mcp.cempala` entry from that OpenCode configuration too; Cempala deliberately does not edit it.
 
-The uninstaller removes the registrations, the `PATH` entry and the executable, and by default keeps everything *else* under `~/.cempala/` — your config, database and audit log:
+The uninstaller removes the registrations it can manage, the `PATH` entry and the executable, and by default keeps everything *else* under `~/.cempala/` — your config, database and audit log:
 
 - **Registrations** go through each CLI's own `mcp remove`, so their config files stay theirs to edit. Only Antigravity, which ships no such command, is edited directly — one key removed, every other server and setting left exactly as it was, and the file never deleted, because it's Antigravity's rather than ours.
 - **The `PATH` export** is removed only where the marker comment the installer wrote is still present. A block someone has edited, a commented-out copy, or a file that merely mentions the same path is left alone — and your line endings and a missing final newline are preserved. Install then uninstall returns a startup file to its original bytes.
 - **Your data is kept.** `~/.cempala/` holds the config, the task history and the audit log; that's a record, not installation debris, and uninstalling the software isn't an instruction to discard it. Only the binary is removed from it — and on Windows, if that binary is still open, it is renamed aside to `cempala.exe.old-…` for you to delete once the session holding it closes. Pass `--purge` (`-Purge` on Windows) to delete the whole directory.
 
-**A step that can't be completed is reported as a failure, not smoothed over.** If a registration won't come out, an rc file can't be written, or the installed binary is too old to know these flags, the run prints what to finish by hand, exits non-zero under a `PARTIALLY uninstalled` banner, and *keeps the binary* — it's the only thing that can retry. When any of that happens *before* the purge step, `--purge` is refused outright, so a half-undone system doesn't also lose its database. (A failure during the deletion itself is different: by then some of the directory may already be gone. That is reported too, but it cannot be undone.)
+**A step that can't be completed is reported as a failure, not smoothed over.** If a registration won't come out, an rc file can't be written, or the installed binary is too old to know these flags, the run prints what to finish by hand, exits non-zero under a `PARTIALLY uninstalled` banner, and *keeps the binary* — it's the only thing that can retry. When any of that happens *before* the purge step, `--purge` (`-Purge` on Windows) is refused outright, so a half-undone system doesn't also lose its database. (A failure during the deletion itself is different: by then some of the directory may already be gone. That is reported too, but it cannot be undone.)
 
-`--dry-run` prints the actions it would take and changes nothing. It doesn't invoke the agent CLIs at all, so it shows what would be attempted rather than predicting whether each step would succeed.
+`--dry-run` (`-DryRun` on Windows) prints the actions it would take and changes nothing. It doesn't invoke the agent CLIs at all, so it shows what would be attempted rather than predicting whether each step would succeed.
 
 ## The 8 MCP tools
 
@@ -294,7 +300,9 @@ exec_command = ["opencode", "run"]
 
 All paths may use `~/`; `config.ts` expands them against `os.homedir()` on read. The file's denylist arrays are starting points. The compile-time baseline is unioned on top and cannot be weakened by trimming.
 
-The agent ids are `antigravity` (binary: `agy`) and `opencode` (binary: `opencode`) — those are the names you pass as `target_agent`; executable names stay in `exec_command`.
+For safety, `sandbox_args` and `permission_args` are accepted only for backward-compatible configuration parsing; dispatch ignores their values and always applies Cempala's fixed per-agent sandbox and permission baseline. `exec_command` is the configurable command prefix; OpenCode's optional `model` is the only additional dispatch setting.
+
+The dispatch agent ids are `codex`, `claude`, `antigravity` (binary: `agy`) and `opencode` (binary: `opencode`). Those are the names you pass as `target_agent`; executable names stay in `exec_command`.
 
 ## Development
 
@@ -305,13 +313,13 @@ bun run typecheck           # tsc --noEmit
 bun run test                # unit tests (bun test test/unit)
 bun run test:install        # installer tests
 bun run test:uninstall      # uninstaller tests
-bun run test:integration    # spawns real codex + claude + agy
-# Add CEMPALA_OPENCODE_INTEGRATION=1 and CEMPALA_OPENCODE_MODEL=<provider/model>
-# to include the live OpenCode dispatch test.
+bun run test:integration    # exercises real Codex, Claude, and Antigravity CLIs
+# Set CEMPALA_OPENCODE_INTEGRATION=1 and CEMPALA_OPENCODE_MODEL=<provider/model>
+# to include the live OpenCode dispatch test (and ensure OpenCode is on PATH).
 bun run build               # compile a binary for this platform
 ```
 
-Build all six release targets, with a `checksums.txt` the installers can verify against:
+Build all six platform targets, with a `checksums.txt` the installers can verify against:
 
 ```sh
 bash scripts/build-all.sh
@@ -319,7 +327,7 @@ bash scripts/build-all.sh
 
 Targets: `bun-darwin-{arm64,x64}`, `bun-linux-{arm64,x64}`, `bun-windows-{arm64,x64}.exe`.
 
-A cross-compiled binary can't be run on the build host, so a successful build says nothing about the artifact. Before a target is published it has to pass:
+A cross-compiled binary can't be run on the build host, so a successful build says nothing about the artifact. Every installer-selected target must pass:
 
 ```sh
 bash scripts/smoke-test.sh dist/cempala-linux-x64
@@ -341,7 +349,7 @@ Both drive the real scripts in a throwaway `HOME` with stub agent CLIs — `test
 
 The uninstaller suite leans hardest on the failure modes, because those are the ones that quietly do damage: an unwritable rc file, a CLI whose `mcp remove` fails, a config it can't parse, a binary too old to know the flags. Each asserts the non-zero exit and the partial-uninstall banner, plus binary retention where a retry needs it; the purge-after-failure cases additionally assert that the database survives. A cleanup that can't finish must never look like one that did.
 
-`.github/workflows/verify.yml` runs the unit suite on Linux, macOS and Windows, both installer suites on Linux and macOS, and smoke-tests every release binary on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact artifact that would be released. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
+`.github/workflows/verify.yml` runs the unit suite on Linux, macOS and Windows, both installer suites on Linux and macOS, and smoke-tests every installer-selected build artifact on matching hardware. The binaries are built once and shipped to each runner, so what gets tested is the exact build output rather than a fresh per-platform rebuild. The experimental Windows ARM64 build is intentionally excluded until matching hardware is available. Some of the suite is meaningful only off Windows — the `spawnDetached` survival test is skipped there by design — so CI is the only place it actually executes.
 
 ## Architecture
 
@@ -354,7 +362,7 @@ The uninstaller suite leans hardest on the failure modes, because those are the 
 - `src/tools/`: one handler file per MCP tool, plus the shared helpers they lean on — `agent-args.ts` for the spawn argv, `agent-output.ts` for parsing what an agent wrote and settling its outcome, `task-liveness.ts` for deciding whether a run is still going. Handlers always return `{ok, data} | {ok: false, error, code}`; `needs_approval` is `ok: true` with `data.status === "needs_approval"`, not a failure.
 - `src/reaper.ts`: FR-17, the stale running-task sweep, piggybacked on every tool call.
 - `src/audit.ts`: FR-8, the append-only `audit_log` writer.
-- `scripts/`: `install.sh` / `install.ps1` and `uninstall.sh` / `uninstall.ps1`, each pair self-contained so it can be run straight from a URL; `build-all.sh` for the six release targets; `smoke-test.sh` for the per-platform check CI runs against release binaries; and `test-install.sh` / `test-uninstall.sh`, the suites for the two scripts Bun can't reach.
+- `scripts/`: `install.sh` / `install.ps1` and `uninstall.sh` / `uninstall.ps1`, each pair self-contained so it can be run straight from a URL; `build-all.sh` for the six platform targets; `smoke-test.sh` for the per-platform check CI runs against workflow build artifacts; and `test-install.sh` / `test-uninstall.sh`, the suites for the two scripts Bun can't reach.
 
 ## The name
 
