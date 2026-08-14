@@ -279,7 +279,9 @@ describe("MCP server (end-to-end via stdio)", () => {
       `exec_command = ["bun", "-e", ${JSON.stringify(fakeOpenCode)}]`,
     ].join("\n"), "utf8");
 
-    const s = await startServer({ HOME: home });
+    // node:os.homedir() resolves USERPROFILE on Windows, not HOME. Set both
+    // so this test never reads a real user-level Cempala config or database.
+    const s = await startServer({ HOME: home, USERPROFILE: home });
     let dispatchTaskId = "";
     try {
       let requestId = 0;
