@@ -310,11 +310,14 @@ describe("config discovery — every file OpenCode reads", () => {
   // Cleaning only the files we would write leaves that one live, pointing
   // at a binary the uninstaller is about to delete.
   test("includes the legacy config.json, not just the two we write", () => {
-    process.env.XDG_CONFIG_HOME = "/xdg";
+    // Expectations are built with join() rather than written as literals:
+    // hardcoded forward slashes pass on Unix and fail on Windows, where
+    // join() returns backslashes.
+    process.env.XDG_CONFIG_HOME = dir;
     expect(openCodeConfigCandidates()).toEqual([
-      "/xdg/opencode/opencode.json",
-      "/xdg/opencode/opencode.jsonc",
-      "/xdg/opencode/config.json",
+      join(dir, "opencode", "opencode.json"),
+      join(dir, "opencode", "opencode.jsonc"),
+      join(dir, "opencode", "config.json"),
     ]);
   });
 
