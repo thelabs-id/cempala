@@ -49,7 +49,7 @@ import { appendAudit } from "./audit.ts";
  * invisible to a test that imports this module, because an import runs the
  * file to completion before asserting anything.
  */
-export const CEMPALA_VERSION = "0.4.0";
+export const CEMPALA_VERSION = "0.5.0";
 
 const ARGS = process.argv.slice(2);
 
@@ -115,8 +115,8 @@ if (ARGS.includes("--unregister-antigravity")) {
 // half lives here. See src/register-opencode.ts.
 if (ARGS.includes("--unregister-opencode")) {
   const { unregisterFromOpenCode, describeUnregisterOutcome } = await import("./register-opencode.ts");
-  // One outcome per config file: OpenCode has two possible filenames and
-  // an entry can genuinely be in either.
+  // One outcome per config file: OpenCode reads three possible filenames
+  // and an entry can genuinely be in any of them.
   const outcomes = unregisterFromOpenCode();
   for (const outcome of outcomes) {
     process.stdout.write(`${describeUnregisterOutcome(outcome).join("\n")}\n`);
