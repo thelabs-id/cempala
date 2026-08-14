@@ -69,3 +69,8 @@ permission_args = ["--permission-mode", "acceptEdits"]
 exec_command = ["agy", "-p"]
 sandbox_args = ["--sandbox"]
 permission_args = ["--mode", "accept-edits"]
+
+[agents.opencode]
+exec_command = ["opencode", "run"]
+# Optional explicit provider/model, e.g. "opencode/big-pickle".
+# model = "opencode/big-pickle"

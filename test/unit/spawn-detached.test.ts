@@ -19,7 +19,7 @@ import { describe, test, expect, afterAll } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isAlive, shouldDetach } from "../../src/platform/spawn.ts";
+import { isAlive, shouldDetach, spawnDetached } from "../../src/platform/spawn.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -57,6 +57,18 @@ async function runParent(
 }
 
 describe("spawnDetached", () => {
+  test("runtime environment overrides preserve inherited PATH", async () => {
+    const outFile = join(dir, "env-merge.log");
+    const child = spawnDetached({
+      argv: [process.execPath, "-e", `console.log(process.env.CEMPALA_TEST_OVERRIDE + ":" + Boolean(process.env.PATH))`],
+      cwd: dir,
+      outputFile: outFile,
+      env: { CEMPALA_TEST_OVERRIDE: "present" },
+    });
+    expect(await child.exited).toBe(0);
+    expect((await Bun.file(outFile).text()).trim()).toBe("present:true");
+  });
+
   test(
     "the child runs to completion after the spawning process exits",
     async () => {

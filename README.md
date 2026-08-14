@@ -8,7 +8,7 @@
 
 **One agent asks. The other just does it.** Same machine, plain language, one turn.
 
-Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code, Codex CLI and Antigravity working together. Ask one for something and it pulls in another, right there in the same session. No second window, no copy-paste, no cloud service in the middle.
+Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claude Code, Codex CLI, Antigravity and OpenCode working together. Ask one for something and it pulls in another, right there in the same session. No second window, no copy-paste, no cloud service in the middle.
 
 <p>
 <a href="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml"><img alt="verify" src="https://github.com/thelabs-id/cempala/actions/workflows/verify.yml/badge.svg" /></a>
@@ -29,7 +29,7 @@ Cempala is a local [MCP](https://modelcontextprotocol.io) server that gets Claud
 
 ## Why
 
-Claude Code, Codex and Antigravity are all capable, but on your machine none of them knows the others exist. Every time you want them to team up, you become the courier. You copy the output from one window, paste it into another, keep track of who did what, and do it again. Cempala takes you out of the middle.
+Claude Code, Codex, Antigravity and OpenCode are all capable, but on your machine none of them knows the others exist. Every time you want them to team up, you become the courier. You copy the output from one window, paste it into another, keep track of who did what, and do it again. Cempala takes you out of the middle.
 
 Ask in plain language and the handoff happens for you:
 
@@ -43,7 +43,7 @@ Ask in plain language and the handoff happens for you:
 
 Cempala gives each agent two complementary ways to hand off work, backed by one shared SQLite notebook (`~/.cempala/cempala.db`) that both read and write:
 
-- **`dispatch` (synchronous).** Shells out to the target agent's headless CLI (`codex exec`, `claude -p`, `agy -p`), waits (bounded timeout), and returns the result inline in the same turn. You wait once; both do the work.
+- **`dispatch` (synchronous).** Shells out to the target agent's headless CLI (`codex exec`, `claude -p`, `agy -p`, `opencode run`), waits (bounded timeout), and returns the result inline in the same turn. You wait once; both do the work.
 - **Mailbox (asynchronous).** `send_message` / `check_messages` and `create_task` -> `claim_task` -> `complete_task` leave work in a shared queue for the other agent to claim when it's ready. Nothing is lost if a job runs long.
 
 Every valid `dispatch` writes a task row before any policy check runs, so the synchronous and mailbox paths share one audit log. (A call rejected for malformed arguments returns before the row is written.) Because it speaks standard MCP, any compatible agent can call these tools and take part in the mailbox — agent identities are created on first use. Becoming a `dispatch` *target* is the narrower case: that needs the agent's headless flags mapped in `agent-args.ts`, so it's a code change rather than configuration.
@@ -60,8 +60,8 @@ Every valid `dispatch` writes a task row before any policy check runs, so the sy
 ## Requirements
 
 - **Bun** is not needed — the installer ships a self-contained binary.
-- **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`), [Codex](https://developers.openai.com/codex/cli) (`codex`), and/or [Antigravity](https://antigravity.google/docs/cli) (`agy`). Install more than one to hand work in either direction.
-- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to `claude`, `codex` and `agy` and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
+- **At least one agent CLI**, on `PATH`: [Claude Code](https://claude.com/claude-code) (`claude`), [Codex](https://developers.openai.com/codex/cli) (`codex`), [Antigravity](https://antigravity.google/docs/cli) (`agy`), and/or [OpenCode](https://opencode.ai) (`opencode`). Install more than one to hand work in either direction.
+- **Each CLI must be signed in.** This is the requirement people trip over. Cempala holds no API keys and never talks to a model itself — it shells out to the installed agent CLIs and lets each one use its own credentials. If a CLI's session has expired, every handoff to that agent fails, typically with a `401`.
 
 Check before you start:
 
@@ -77,7 +77,11 @@ codex exec "reply with OK"
 agy -p "reply with OK"
 ```
 
-If any of them prints an authentication error instead of `OK`, sign that CLI in — `claude auth`, `codex login` (`codex login status` shows where you stand), or run `agy` once interactively and complete the browser sign-in — and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem. An unauthenticated `agy` is distinctive: it waits 60 seconds for a sign-in that a headless dispatch can never complete, then returns `authentication failed or timed out`.
+```sh
+opencode run "reply with OK"
+```
+
+If any of them prints an authentication error instead of `OK`, sign that CLI in and re-run the check. Credentials expire periodically, so it's worth re-checking whenever handoffs to one agent suddenly start failing: a `dispatch` result of `status: "failed"` carrying a `401` is almost always this, not a Cempala problem. An unauthenticated `agy` is distinctive: it waits 60 seconds for a sign-in that a headless dispatch can never complete, then returns `authentication failed or timed out`.
 
 ## Install
 
@@ -113,6 +117,31 @@ Both installers:
 - run `cempala --init` to write a default `~/.cempala/config.toml` if absent
 - auto-register with `claude` and/or `codex` MCP if found on `PATH`
 - register with Antigravity by merging an entry into `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json` on Windows), which covers both the Antigravity IDE and the `agy` CLI. Antigravity has no `mcp add` subcommand, so this is a JSON edit rather than a CLI call — it preserves every other server and top-level key already in that file, and if the file can't be parsed it's left untouched and the exact snippet is printed for you to paste. You can re-run just this step with `cempala --register-antigravity`.
+
+### OpenCode MCP setup
+
+OpenCode can use all Cempala tools as a standard local MCP server. Add this to your global `~/.config/opencode/opencode.json` (or a project `opencode.json`) and restart OpenCode:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "cempala": {
+      "type": "local",
+      "command": ["/absolute/path/to/cempala"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Use the exact executable path printed by the installer—normally `~/.cempala/bin/cempala` (or `%USERPROFILE%\.cempala\bin\cempala.exe` on Windows). OpenCode's equivalent non-interactive registration command is:
+
+```sh
+opencode mcp add cempala -- /absolute/path/to/cempala
+```
+
+Check the connection with `opencode mcp list`. Cempala does not rewrite an OpenCode configuration automatically because OpenCode has no matching `mcp remove` command; the explicit entry keeps installation and removal reversible without Cempala editing configuration it does not own.
 
 On macOS and Linux "the file your shell actually reads" is `~/.zshrc` for zsh. For bash it's *two* files — a login one (`~/.bash_profile`, or whichever of `~/.bash_login` / `~/.profile` you already use) **and** `~/.bashrc` — because bash reads a different file depending on whether the shell is a login shell, and which one your terminal opens varies by platform. Picking one means being wrong for a lot of people. The snippet is guarded, so being read from both adds the directory to `PATH` exactly once.
 
@@ -155,7 +184,7 @@ The uninstaller removes the registrations, the `PATH` entry and the executable, 
 | `create_task` | Create a mailbox task; validates `cwd` against the trust boundary. | FR-3 |
 | `claim_task` | Claim a pending task; fails for non-`pending` states. | FR-4 |
 | `complete_task` | Mark a claimed/running task `completed` or `failed`. | FR-5 |
-| `dispatch` | Synchronously run a prompt in the target agent's CLI — `target_agent` is `"claude"`, `"codex"` or `"antigravity"`. Returns the result, or `running` at the wait timeout. A `completed`, `failed` or `running` result carries `network_enforcement`, saying what was actually applied. `needs_approval` results carry a `reason` (`"outside_home"` or `"ancestor_of_denylist"`) so the caller can tell "approve this path" from "narrow the cwd". | FR-6 |
+| `dispatch` | Synchronously run a prompt in the target agent's CLI — `target_agent` is `"claude"`, `"codex"`, `"antigravity"` or `"opencode"`. Returns the result, or `running` at the wait timeout. A `completed`, `failed` or `running` result carries `network_enforcement`, saying what was actually applied. `needs_approval` results carry a `reason` (`"outside_home"` or `"ancestor_of_denylist"`) so the caller can tell "approve this path" from "narrow the cwd". | FR-6 |
 | `check_task` | Read current task state; reconciles a `running` task whose process has died. | FR-7 |
 | `approve_path` | Persist a path outside the home into `approved_paths`. Denylisted paths cannot be approved. | FR-7a |
 
@@ -175,8 +204,9 @@ Every call is logged to `audit_log` with timing, args, and a short result summar
 - **Sandbox scope** is set per agent CLI per dispatch:
   - Codex: `--sandbox workspace-write` (with `-c sandbox_workspace_write.network_access=true` only when `allow_network: true`). Egress is **OS-sandbox-enforced**.
   - Claude: `--tools "<baseline + WebFetch + WebSearch if allow_network>"`, plus `--disallowedTools "WebFetch,WebSearch"` only when `allow_network: false`. The web tools are removed, but Claude's `Bash` can still `curl`, so the dispatch result reports this honestly as `network_enforcement: "tools_only"` rather than the stronger `"sandboxed"` (which only Codex gets).
-  - Antigravity: `--sandbox --mode accept-edits --add-dir <cwd>`. **`allow_network: false` cannot be enforced here**, and the result says so — see below. Its `--print-timeout` is also raised from agy's 5-minute default to the reaper's 30-minute window: agy is the only one of the three that kills its own run on a clock, and at the default an Antigravity task would stop early while cempala went on tracking it.
-- **`--add-dir` is forbidden in `config.toml`** for every CLI. It's the documented escape hatch from the cwd-anchored scope on all three, and any config that introduces it is rejected at load time. So is `--dangerously-skip-permissions`, which Claude and Antigravity both spell the same way.
+  - Antigravity: `--sandbox --mode accept-edits --add-dir <cwd>`. **`allow_network: false` cannot be enforced here**, and the result says so — see below. Its `--print-timeout` is also raised from agy's 5-minute default to the reaper's 30-minute window: agy is the only configured CLI that kills its own run on a clock, and at the default an Antigravity task would stop early while cempala went on tracking it.
+  - OpenCode: `opencode run --format json` with a per-dispatch runtime permission policy. It denies questions, plan transitions, paths outside the validated workspace and nested subagents; `webfetch` and `websearch` are denied when `allow_network: false`. Its `Bash` tool can still make direct network requests, so the result honestly reports `network_enforcement: "tools_only"`, not `"sandboxed"`.
+- **`--add-dir` is forbidden in `config.toml`** for every configured CLI. It's the documented escape hatch from the cwd-anchored scope, and any config that introduces it is rejected at load time. Cempala also rejects `--dangerously-skip-permissions` wherever present, plus OpenCode's `--auto`, so configuration cannot bypass its runtime permission policy.
 
   Cempala's own baseline does pass `--add-dir <cwd>` for Antigravity, and that is the opposite of an escape hatch — see below.
 
@@ -196,6 +226,7 @@ A `dispatch` that reached the point of spawning — a `completed`, `failed` or `
 |---|---|---|
 | `codex` | `"sandboxed"` — OS sandbox blocks egress | `"allowed"` |
 | `claude` | `"tools_only"` — web tools removed, but `Bash` can still `curl` | `"allowed"` |
+| `opencode` | `"tools_only"` — web tools and external paths denied, but Bash can still make network requests | `"allowed"` |
 | `antigravity` | `"not_enforceable"` — **the request could not be applied** | `"allowed"` |
 
 Antigravity gets a fourth label because `agy` exposes no argv-level network switch: it has no counterpart to Codex's `network_access` config key or Claude's `--tools` / `--disallowedTools`. Its network reach is governed by the `read_url` and `execute_url` permissions in *your own* agy settings, which Cempala neither reads nor writes. `--sandbox` is still applied — it confines the commands the agent *runs* (`sandbox-exec` on macOS, `nsjail` on Linux, AppContainer on Windows) — but that isn't a guarantee about the agent's own reach, so it doesn't earn the `"sandboxed"` label.
@@ -254,11 +285,16 @@ permission_args = ["--permission-mode", "acceptEdits"]
 exec_command = ["agy", "-p"]
 sandbox_args = ["--sandbox"]
 permission_args = ["--mode", "accept-edits"]
+
+[agents.opencode]
+exec_command = ["opencode", "run"]
+# Optional explicit provider/model, e.g. "opencode/big-pickle".
+# model = "opencode/big-pickle"
 ```
 
 All paths may use `~/`; `config.ts` expands them against `os.homedir()` on read. The file's denylist arrays are starting points. The compile-time baseline is unioned on top and cannot be weakened by trimming.
 
-The agent id is `antigravity` even though the binary is `agy` — that's the name you pass as `target_agent`, and the binary name stays where it belongs, in `exec_command`.
+The agent ids are `antigravity` (binary: `agy`) and `opencode` (binary: `opencode`) — those are the names you pass as `target_agent`; executable names stay in `exec_command`.
 
 ## Development
 
@@ -270,6 +306,8 @@ bun run test                # unit tests (bun test test/unit)
 bun run test:install        # installer tests
 bun run test:uninstall      # uninstaller tests
 bun run test:integration    # spawns real codex + claude + agy
+# Add CEMPALA_OPENCODE_INTEGRATION=1 and CEMPALA_OPENCODE_MODEL=<provider/model>
+# to include the live OpenCode dispatch test.
 bun run build               # compile a binary for this platform
 ```
 

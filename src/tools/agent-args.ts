@@ -30,14 +30,14 @@ import type { AppConfig, AgentConfig } from "../config.ts";
 import { ACTIVITY_GRACE_MS } from "./task-liveness.ts";
 
 /** The agent CLIs cempala knows how to spawn. */
-export type AgentId = "codex" | "claude" | "antigravity";
+export type AgentId = "codex" | "claude" | "antigravity" | "opencode";
 
 /**
  * Network enforcement label (FR-13).
  *
  * The first three describe a restriction we actually imposed on the child:
- * codex is sandboxed, claude has the web tools taken away, or the caller
- * asked for network and got it.
+ * codex is sandboxed, Claude/OpenCode have web tools taken away, or the
+ * caller asked for network and got it.
  *
  * `not_enforceable` is the fourth, and it is an admission rather than a
  * restriction. The Antigravity CLI exposes no argv-level control over
@@ -110,6 +110,9 @@ const FORBIDDEN_FLAG_SUBSTRINGS: Array<{ cli: AgentId | "any"; needle: string }>
   // prefix.
   { cli: "any", needle: "dangerously-skip-permissions" },
   { cli: "claude", needle: "bypassPermissions" },
+  // OpenCode calls this an explicit dangerous bypass. Cempala provides its
+  // own narrow permission policy instead of allowing config to opt out.
+  { cli: "opencode", needle: "--auto" },
 ];
 
 /**
@@ -147,6 +150,8 @@ export function assertArgvSafe(argv: readonly string[], cli: AgentId, source: st
 export interface ResolvedArgv {
   /** Full argv for Bun.spawn. argv[0] is the executable name. */
   argv: string[];
+  /** Environment variables that must accompany this one dispatch. */
+  env?: Record<string, string>;
   /** What kind of network enforcement is actually in effect (FR-13). */
   network_enforcement: NetworkEnforcement;
   /** Human-readable summary, for logs and tests. */
@@ -386,7 +391,7 @@ export function resolveAntigravityArgv(
 
   // Raise agy's own print-mode timeout to the reaper's window.
   //
-  // agy is the only one of the three CLIs that kills its own run on a
+  // agy is the only configured CLI that kills its own run on a
   // clock (`--print-timeout`, default 5m). Left at the default, an
   // Antigravity task would die at five minutes while cempala went on
   // tracking it for thirty — so a dispatch that timed out its wait and
@@ -411,6 +416,60 @@ export function resolveAntigravityArgv(
     description: allow_network
       ? "agy -p sandbox(cmd) net=allowed"
       : "agy -p sandbox(cmd) net=requested-off-but-not-enforceable",
+  };
+}
+
+/**
+ * Runtime policy injected into every OpenCode dispatch.
+ *
+ * OpenCode's headless CLI operates its own permission system rather than an
+ * OS sandbox. We therefore make its policy explicit for every spawned run:
+ * normal workspace work remains available, but prompt/plan interaction,
+ * external paths, subagents, and web tools (when networking is disallowed)
+ * are denied. The policy arrives through OPENCODE_CONFIG_CONTENT, which
+ * OpenCode loads as a runtime override after project configuration.
+ *
+ * This is intentionally a `tools_only` guarantee. Bash remains available so
+ * an OpenCode agent can do ordinary development work, and a shell command can
+ * still make a network request; claiming an OS-enforced no-network sandbox
+ * would be false.
+ */
+function openCodeRuntimeConfig(allowNetwork: boolean): string {
+  return JSON.stringify({
+    permission: {
+      "*": "allow",
+      question: "deny",
+      plan_enter: "deny",
+      plan_exit: "deny",
+      external_directory: "deny",
+      task: "deny",
+      webfetch: allowNetwork ? "allow" : "deny",
+      websearch: allowNetwork ? "allow" : "deny",
+    },
+  });
+}
+
+/** Resolve an OpenCode non-interactive run and its runtime permissions. */
+export function resolveOpenCodeArgv(
+  cfg: AppConfig,
+  prompt: string,
+  allowNetwork: boolean,
+): ResolvedArgv {
+  const a: AgentConfig = cfg.agents.opencode;
+  // An explicit empty --title makes OpenCode derive a local title from the
+  // prompt instead of spending a second model request on session titling.
+  // That keeps short headless dispatches single-request and makes provider
+  // failures surface sooner.
+  const argv = [...a.exec_command, "--format", "json", "--title", ""];
+  if (a.model) argv.push("--model", a.model);
+  argv.push(prompt);
+  return {
+    argv,
+    network_enforcement: allowNetwork ? "allowed" : "tools_only",
+    description: allowNetwork
+      ? "opencode run format=json permissions=workspace,net=allowed"
+      : "opencode run format=json permissions=workspace,web-tools-denied",
+    env: { OPENCODE_CONFIG_CONTENT: openCodeRuntimeConfig(allowNetwork) },
   };
 }
 
@@ -441,6 +500,9 @@ export function resolveAgentArgv(
   }
   if (target_agent === "antigravity") {
     return resolveAntigravityArgv(cfg, prompt, cwd, allow_network);
+  }
+  if (target_agent === "opencode") {
+    return resolveOpenCodeArgv(cfg, prompt, allow_network);
   }
   return resolveClaudeArgv(cfg, prompt, allow_network, allowed_tools);
 }

@@ -49,7 +49,7 @@ import { appendAudit } from "./audit.ts";
  * invisible to a test that imports this module, because an import runs the
  * file to completion before asserting anything.
  */
-export const CEMPALA_VERSION = "0.3.0";
+export const CEMPALA_VERSION = "0.4.0";
 
 const ARGS = process.argv.slice(2);
 
@@ -266,8 +266,8 @@ const TOOL_DEFS = [
       prompt: { type: "string" },
       cwd: { type: "string" },
       wait_seconds: { type: ["number", "null"], description: "Max wait time; capped at 600 (config.dispatch.max_wait_seconds)" },
-      allowed_tools: { type: ["array", "null"], items: { type: "string" }, description: "Narrows Claude's built-in tools by intersection. No-op for codex and antigravity, which have no argv-level tool allowlist." },
-      allow_network: { type: ["boolean", "null"], description: "Whether the spawned agent may reach the network. The result's network_enforcement says what was actually applied; for antigravity a false value reports 'not_enforceable', because agy exposes no argv-level network switch." },
+      allowed_tools: { type: ["array", "null"], items: { type: "string" }, description: "Narrows Claude's built-in tools by intersection. No-op for codex, antigravity, and opencode, which have no argv-level tool allowlist." },
+      allow_network: { type: ["boolean", "null"], description: "Whether the spawned agent may reach the network. The result's network_enforcement says what was actually applied: OpenCode false is tools_only (web tools denied; Bash remains available); antigravity false is not_enforceable because agy has no argv-level network switch." },
       created_by: { type: ["string", "null"] },
     },
     required: ["target_agent", "prompt", "cwd"],

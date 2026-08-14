@@ -48,6 +48,12 @@ const CODEX_MIDRUN = [
   `{"type":"turn.started"}`,
 ].join("\n");
 
+const OPENCODE_DONE = [
+  `{"type":"step_start","part":{"type":"step-start"}}`,
+  `{"type":"text","part":{"type":"text","text":"OPENCODE_DONE"}}`,
+  `{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}`,
+].join("\n");
+
 describe("assessTask", () => {
   test("THE BUG: a dead pid mid-run is NOT reported as finished", () => {
     // Exactly the observed case: shim dead, agent still working, output has
@@ -72,6 +78,19 @@ describe("assessTask", () => {
     write(CODEX_DONE);
     const r = assessTask({ pid: LIVE_PID, outputFile: outFile });
     expect(r.state).toBe("finished");
+  });
+
+  test("a completed OpenCode stream settles even when only a Windows launcher pid existed", () => {
+    // Regression for OpenCode's step_finish marker. With no parser verdict,
+    // a dead .cmd shim left this fresh stream in `running` until the reaper
+    // marked it failed despite the final answer being present.
+    write(OPENCODE_DONE);
+    const r = assessTask({ pid: null, outputFile: outFile });
+    expect(r.state).toBe("finished");
+    if (r.state === "finished") {
+      expect(r.exitCode).toBe(0);
+      expect(r.resultText).toBe("OPENCODE_DONE");
+    }
   });
 
   test("a live pid with no verdict is still running", () => {

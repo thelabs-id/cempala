@@ -15,6 +15,9 @@
 import { describe, test, expect } from "bun:test";
 import { spawn, type Subprocess } from "bun";
 import { join } from "node:path";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { Database } from "bun:sqlite";
 
 interface JsonRpcResponse {
   jsonrpc: string;
@@ -30,10 +33,11 @@ interface ServerHandle {
   close: () => void;
 }
 
-async function startServer(): Promise<ServerHandle> {
+async function startServer(env?: Record<string, string | undefined>): Promise<ServerHandle> {
   const proc = spawn({
     cmd: ["bun", "run", "src/index.ts"],
     cwd: process.cwd(),
+    env: env ? { ...process.env, ...env } : undefined,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const encoder = new TextEncoder();
@@ -201,7 +205,7 @@ describe("MCP server (end-to-end via stdio)", () => {
       const tools = (r?.result as { tools?: { name: string; inputSchema?: any }[] })?.tools ?? [];
       const dispatchTool = tools.find((t) => t.name === "dispatch");
       const targets: string[] = dispatchTool?.inputSchema?.properties?.target_agent?.enum ?? [];
-      expect([...targets].sort()).toEqual(["antigravity", "claude", "codex"]);
+      expect([...targets].sort()).toEqual(["antigravity", "claude", "codex", "opencode"]);
     } finally { s.close(); }
   });
 
@@ -246,5 +250,99 @@ describe("MCP server (end-to-end via stdio)", () => {
       expect(inner.ok).toBe(false);
       expect(inner.code).toBe("denylist");
     } finally { s.close(); }
+  });
+
+  test("every MCP tool works together, including an OpenCode dispatch, and persists auditable state", async () => {
+    // Give the spawned server a hermetic config, database, output directory
+    // and trust root. The fake OpenCode executable speaks the real JSONL
+    // event shape, so this is an end-to-end protocol test without spending
+    // an external provider request in the unit suite.
+    const root = mkdtempSync(join(tmpdir(), "cempala-mcp-all-"));
+    const home = join(root, "home");
+    const workspace = join(home, "workspace");
+    const configDir = join(home, ".cempala");
+    const dbPath = join(configDir, "cempala.db");
+    const outputs = join(configDir, "outputs");
+    const outside = join(root, "approved-outside");
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(outputs, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const fakeOpenCode = 'process.stdout.write(JSON.stringify({type:"text",part:{type:"text",text:"CEMPALA_OPENCODE_OK"}})+"\\n")';
+    writeFileSync(join(configDir, "config.toml"), [
+      "[server]",
+      `db_path = ${JSON.stringify(dbPath)}`,
+      `output_dir = ${JSON.stringify(outputs)}`,
+      "[trust]",
+      `home_root = ${JSON.stringify(home)}`,
+      "denylist = []",
+      "[agents.opencode]",
+      `exec_command = ["bun", "-e", ${JSON.stringify(fakeOpenCode)}]`,
+    ].join("\n"), "utf8");
+
+    const s = await startServer({ HOME: home });
+    let dispatchTaskId = "";
+    try {
+      let requestId = 0;
+      const call = async (name: string, args: Record<string, unknown>) => {
+        requestId += 1;
+        await s.send({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name, arguments: args } });
+        const response = await s.readOne();
+        expect(response?.id).toBe(requestId);
+        const body = ((response?.result as { content?: { text: string }[] })?.content?.[0]?.text) ?? "";
+        return JSON.parse(body) as { ok: boolean; data?: any };
+      };
+
+      await s.send({
+        jsonrpc: "2.0", id: 100, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "all-tools", version: "0" } },
+      });
+      expect((await s.readOne())?.id).toBe(100);
+
+      const sent = await call("send_message", { from_agent: "opencode", to_agent: "codex", content: "handoff ready" });
+      expect(sent.ok).toBe(true);
+      const messages = await call("check_messages", { agent_id: "codex" });
+      expect(messages.ok).toBe(true);
+      expect(messages.data[0].content).toBe("handoff ready");
+
+      const created = await call("create_task", {
+        description: "mailbox handoff", created_by: "opencode", assigned_to: "opencode", cwd: workspace,
+      });
+      expect(created.data.status).toBe("pending");
+      const mailboxTaskId = created.data.task_id as string;
+      expect((await call("claim_task", { task_id: mailboxTaskId, agent_id: "opencode" })).ok).toBe(true);
+      expect((await call("complete_task", { task_id: mailboxTaskId, status: "completed", result: "done" })).ok).toBe(true);
+      expect((await call("check_task", { task_id: mailboxTaskId })).data.status).toBe("completed");
+
+      const approved = await call("approve_path", { agent_id: "opencode", path: outside });
+      expect(approved.ok).toBe(true);
+
+      const dispatched = await call("dispatch", {
+        target_agent: "opencode",
+        prompt: "reply with the test token", cwd: workspace, wait_seconds: 10,
+        allow_network: false, created_by: "opencode",
+      });
+      expect(dispatched.ok).toBe(true);
+      expect(dispatched.data.status).toBe("completed");
+      expect(dispatched.data.result).toBe("CEMPALA_OPENCODE_OK");
+      expect(dispatched.data.network_enforcement).toBe("tools_only");
+      dispatchTaskId = dispatched.data.task_id as string;
+    } finally {
+      s.close();
+      await s.proc.exited;
+    }
+
+    // This is deliberately outside the MCP surface: it verifies that the
+    // calls above committed their database rows and that the dispatched
+    // OpenCode JSONL log is both retained and parseable after the server
+    // exits.
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      expect(db.query("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).toEqual({ n: 8 });
+      const dispatched = db.query("SELECT status, output_file FROM tasks WHERE id = ?").get(dispatchTaskId) as { status: string; output_file: string };
+      expect(dispatched.status).toBe("completed");
+      expect(readFileSync(dispatched.output_file, "utf8")).toContain("CEMPALA_OPENCODE_OK");
+    } finally {
+      db.close();
+    }
   });
 });

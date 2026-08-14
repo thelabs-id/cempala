@@ -97,16 +97,17 @@ export function spawnDetached(opts: SpawnOptions): SpawnHandle {
   const outFd = openSync(outFile, "w");
   const errFd = openSync(errFile, "w");
 
-  // Cross-platform note: we deliberately let Bun.spawn inherit the parent
-  // process's env by default. Spreading `process.env` into an `env` object
-  // on Windows can cause the spawned process to lose the PATH/PATHEXT
-  // resolution context for the .cmd / .ps1 wrappers the npm-installed
-  // CLIs use, surfacing as "ENOENT: uv_spawn 'codex'". When the caller
-  // supplies explicit overrides, we layer them on top — but only those
-  // overrides; the rest is inherited automatically. To override PATH
-  // itself, the caller is expected to put the new value in opts.env.
+  // Bun treats an explicit `env` object as the child process's complete
+  // environment rather than a patch. Runtime overrides therefore must be
+  // layered over process.env; passing only OPENCODE_CONFIG_CONTENT made the
+  // OpenCode dispatch lose PATH and fail before it could start. Keeping the
+  // default `undefined` path preserves Bun's ordinary inheritance for all
+  // other dispatches, while an override retains PATH/PATHEXT (needed by
+  // Windows npm shims) as well as every credential the target CLI normally
+  // inherits. The PATH behavior is covered by spawn-detached.test.ts;
+  // Windows shim behavior remains covered by the platform-gated suite.
   const env: Record<string, string | undefined> | undefined = opts.env
-    ? opts.env
+    ? { ...process.env, ...opts.env }
     : undefined;
 
   // See shouldDetach() — on Windows this depends on what we're actually

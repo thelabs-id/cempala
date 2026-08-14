@@ -9,9 +9,12 @@
 // mislabelings are the specific failures this test exists to catch.
 
 import { describe, test, expect } from "bun:test";
-import { DEFAULT_CONFIG, type AppConfig } from "../../src/config.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_CONFIG, loadConfig, type AppConfig } from "../../src/config.ts";
 import { ACTIVITY_GRACE_MS } from "../../src/tools/task-liveness.ts";
-import { resolveCodexArgv, resolveClaudeArgv, resolveAntigravityArgv, resolveAgentArgv, findForbiddenFlag, assertArgvSafe } from "../../src/tools/agent-args.ts";
+import { resolveCodexArgv, resolveClaudeArgv, resolveAntigravityArgv, resolveOpenCodeArgv, resolveAgentArgv, findForbiddenFlag, assertArgvSafe } from "../../src/tools/agent-args.ts";
 
 const CFG: AppConfig = { ...DEFAULT_CONFIG, source: "<test>" };
 
@@ -277,6 +280,62 @@ describe("resolveAntigravityArgv (AC-13)", () => {
     // mechanism for the same thing.
     expect(resolveAgentArgv(CFG, "codex", "x", CWD, false).argv).not.toContain("--add-dir");
     expect(resolveAgentArgv(CFG, "claude", "x", CWD, false).argv).not.toContain("--add-dir");
+  });
+});
+
+describe("resolveOpenCodeArgv (AC-13)", () => {
+  test("uses non-interactive JSON event output and exposes a runtime policy", () => {
+    const r = resolveOpenCodeArgv(CFG, "do thing", false);
+    expect(r.argv).toEqual(["opencode", "run", "--format", "json", "--title", "", "do thing"]);
+    expect(r.network_enforcement).toBe("tools_only");
+    const policy = JSON.parse(r.env?.OPENCODE_CONFIG_CONTENT ?? "{}");
+    expect(policy.permission.external_directory).toBe("deny");
+    expect(policy.permission.webfetch).toBe("deny");
+    expect(policy.permission.websearch).toBe("deny");
+    expect(policy.permission.task).toBe("deny");
+  });
+
+  test("uses a configured model without letting it alter Cempala's fixed flags", () => {
+    const cfg: AppConfig = {
+      ...CFG,
+      agents: { ...CFG.agents, opencode: { ...CFG.agents.opencode, model: "opencode/big-pickle" } },
+    };
+    expect(resolveOpenCodeArgv(cfg, "do thing", false).argv)
+      .toEqual(["opencode", "run", "--format", "json", "--title", "", "--model", "opencode/big-pickle", "do thing"]);
+  });
+
+  test("network-enabled runs allow OpenCode web tools and report allowed", () => {
+    const r = resolveOpenCodeArgv(CFG, "do thing", true);
+    expect(r.network_enforcement).toBe("allowed");
+    const policy = JSON.parse(r.env?.OPENCODE_CONFIG_CONTENT ?? "{}");
+    expect(policy.permission.webfetch).toBe("allow");
+    expect(policy.permission.websearch).toBe("allow");
+  });
+
+  test("the router reaches OpenCode rather than falling through to Claude", () => {
+    const r = resolveAgentArgv(CFG, "opencode", "do thing", CWD, false);
+    expect(r.argv).toEqual(resolveOpenCodeArgv(CFG, "do thing", false).argv);
+    expect(r.argv).not.toContain("--tools");
+    expect(r.argv).not.toContain("--permission-mode");
+  });
+
+  test("OpenCode's dangerous approval switches cannot come from config", () => {
+    expect(findForbiddenFlag(["opencode", "run", "--auto"], "opencode")).toBe("--auto");
+    expect(findForbiddenFlag(["opencode", "run", "--dangerously-skip-permissions"], "opencode"))
+      .toBe("dangerously-skip-permissions");
+  });
+
+  test("a configured OpenCode model is trimmed and subject to the same safety validation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cempala-opencode-model-"));
+    const p = join(dir, "config.toml");
+    try {
+      writeFileSync(p, `[agents.opencode]\nmodel = "  opencode/big-pickle  "\n`, "utf8");
+      expect(loadConfig(p).agents.opencode.model).toBe("opencode/big-pickle");
+      writeFileSync(p, `[agents.opencode]\nmodel = "--auto"\n`, "utf8");
+      expect(() => loadConfig(p)).toThrow("forbidden flag '--auto'");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

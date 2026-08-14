@@ -59,6 +59,9 @@ beforeEach(() => {
         exec_command: [process.execPath, join(scriptsDir, "fast.js")],
         // No sandbox_args / permission_args
       },
+      opencode: {
+        exec_command: [process.execPath, join(scriptsDir, "fast.js")],
+      },
     },
     source: "<test>",
   };

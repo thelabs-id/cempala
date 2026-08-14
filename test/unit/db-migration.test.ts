@@ -106,10 +106,10 @@ describe("agent seed", () => {
   }
 
   test("a fresh database seeds every shipped agent", () => {
-    expect(agentIdsIn(join(dir, "seed-fresh.db"))).toEqual(["antigravity", "claude", "codex"]);
+    expect(agentIdsIn(join(dir, "seed-fresh.db"))).toEqual(["antigravity", "claude", "codex", "opencode"]);
   });
 
-  test("a database seeded by an earlier build gains antigravity on the next open", () => {
+  test("a database seeded by an earlier build gains newly shipped agents on the next open", () => {
     // messages.from_agent and tasks.assigned_to are foreign keys into this
     // table, so an id that never got seeded does not fail here — it fails
     // at the first mailbox hand-off, a long way from the cause. The
@@ -129,7 +129,7 @@ describe("agent seed", () => {
     `);
     old.close();
 
-    expect(agentIdsIn(dbPath)).toEqual(["antigravity", "claude", "codex"]);
+    expect(agentIdsIn(dbPath)).toEqual(["antigravity", "claude", "codex", "opencode"]);
   });
 
   test("re-opening does not duplicate or rewrite the seeded rows", () => {

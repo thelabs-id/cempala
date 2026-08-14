@@ -281,6 +281,7 @@ export async function dispatch(
       argv: resolved.argv,
       cwd: validatedCwd, // use the same path we validated, not the raw input
       outputFile: outFile,
+      env: resolved.env,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

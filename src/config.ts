@@ -36,6 +36,8 @@ export interface AgentConfig {
   exec_command: string[];
   sandbox_args?: string[];
   permission_args?: string[];
+  /** Optional OpenCode model selector (for example `opencode/big-pickle`). */
+  model?: string;
 }
 
 export interface AppConfig {
@@ -46,6 +48,7 @@ export interface AppConfig {
     codex: AgentConfig;
     claude: AgentConfig;
     antigravity: AgentConfig;
+    opencode: AgentConfig;
   };
   /** Where the config was actually loaded from (for diagnostics). */
   source: string;
@@ -84,6 +87,9 @@ const DEFAULTS: AppConfig = {
       exec_command: ["agy", "-p"],
       sandbox_args: ["--sandbox"],
       permission_args: ["--mode", "accept-edits"],
+    },
+    opencode: {
+      exec_command: ["opencode", "run"],
     },
   },
   source: "<defaults>",
@@ -159,6 +165,15 @@ function mergeConfig(base: AppConfig, raw: Record<string, unknown>): AppConfig {
         assertArgvSafe(list, id, `agents.${id}.${key}`);
         out.agents[id][key] = list;
       }
+      // A model is meaningful to OpenCode today. Keep it on the shared
+      // shape so a config can select a usable provider without having to
+      // smuggle `--model` into exec_command, where it could be ordered
+      // incorrectly relative to Cempala's fixed arguments.
+      if (typeof raw_agent.model === "string" && raw_agent.model.trim() !== "") {
+        const model = raw_agent.model.trim();
+        assertArgvSafe([model], id, `agents.${id}.model`);
+        out.agents[id].model = model;
+      }
     }
   }
   return out;
@@ -169,7 +184,7 @@ function mergeConfig(base: AppConfig, raw: Record<string, unknown>): AppConfig {
  * seed and the dispatch validator all read the same list instead of each
  * keeping its own copy to fall out of date.
  */
-export const AGENT_IDS = ["codex", "claude", "antigravity"] as const satisfies readonly AgentId[];
+export const AGENT_IDS = ["codex", "claude", "antigravity", "opencode"] as const satisfies readonly AgentId[];
 
 /**
  * The default config.toml that `cempala --init` writes. Deliberately omits
@@ -243,6 +258,13 @@ permission_args = ["--permission-mode", "acceptEdits"]
 exec_command = ["agy", "-p"]
 sandbox_args = ["--sandbox"]
 permission_args = ["--mode", "accept-edits"]
+
+# OpenCode CLI. Cempala supplies its runtime permission policy and JSON event
+# format; this only changes which executable is invoked. Uncomment \`model\`
+# to select a configured OpenCode provider/model explicitly.
+[agents.opencode]
+exec_command = ["opencode", "run"]
+# model = "opencode/big-pickle"
 `;
 
 /**

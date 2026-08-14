@@ -192,6 +192,45 @@ describe("parseAgentOutput — antigravity JSON", () => {
   });
 });
 
+describe("parseAgentOutput — OpenCode JSONL", () => {
+  const OPENCODE_OK = [
+    `{"type":"step_start","sessionID":"ses_1","part":{"type":"step-start"}}`,
+    `{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"Working...","time":{"start":1,"end":2}}}`,
+    `{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"OPENCODE_OK","time":{"start":2,"end":3}}}`,
+    `{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop"}}`,
+  ].join("\n");
+
+  test("returns the final completed text part rather than the raw event stream", () => {
+    const r = parseAgentOutput(OPENCODE_OK);
+    expect(r.resultText).toBe("OPENCODE_OK");
+    expect(r.resultText).not.toContain("step_start");
+  });
+
+  test("recognises a clean step_finish as a terminal success", () => {
+    expect(parseAgentOutput(OPENCODE_OK).inferredExitCode).toBe(0);
+  });
+
+  test("does not infer completion from text alone", () => {
+    expect(parseAgentOutput(OPENCODE_OK.split("\n").slice(0, -1).join("\n")).inferredExitCode).toBeNull();
+  });
+
+  test("does not treat a tool-calls step boundary as a terminal result", () => {
+    const toolCallStream = [
+      `{"type":"text","part":{"type":"text","text":"before tool"}}`,
+      `{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls"}}`,
+    ].join("\n");
+    const r = parseAgentOutput(toolCallStream);
+    expect(r.inferredExitCode).toBeNull();
+    expect(r.resultText).toBe("before tool");
+  });
+
+  test("surfaces a session error over earlier text", () => {
+    const r = parseAgentOutput(`${OPENCODE_OK}\n{"type":"error","error":{"data":{"message":"provider failed"}}}`);
+    expect(r.inferredExitCode).toBe(1);
+    expect(r.resultText).toContain("provider failed");
+  });
+});
+
 describe("reconcileOutcome — stderr is read when there is nothing else to go on", () => {
   // The real stderr line agy writes when headless mode auto-denies a tool.
   const SOFT_DENY = `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.`;

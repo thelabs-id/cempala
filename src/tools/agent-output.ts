@@ -8,7 +8,7 @@
 // never emits, so the caller got a token-usage line or the raw JSONL blob
 // instead of the agent's answer.
 //
-// Three CLIs, three output shapes:
+// Four CLIs, four output shapes:
 //
 //   claude -p --output-format json
 //     ONE JSON object with a `result` field (plus `is_error` / `subtype`).
@@ -34,6 +34,15 @@
 //     should be — the exact failure the codex bug in this file's history
 //     was. (The ERROR case would have limped through the bare-`error`
 //     rule, which is what makes the success case so easy to miss.)
+//
+//   opencode run --format json
+//     A JSONL stream. Assistant text is emitted in `text` events under
+//     `part.text`. A run is terminal only when its final `step_finish`
+//     carries `part.reason: "stop"`; `tool-calls` is merely the boundary
+//     before OpenCode invokes an MCP or built-in tool and starts another
+//     step. This distinction is essential on restart / Windows launcher
+//     reconciliation, where a partial stream must not be promoted to a
+//     completed task.
 
 export interface ParsedAgentOutput {
   /** The agent's final answer — what the calling agent should read. */
@@ -288,6 +297,7 @@ export function parseAgentOutput(text: string): ParsedAgentOutput {
   }
 
   let lastMessage: string | null = null;
+  let lastOpenCodeText: string | null = null;
   let sawCompletion = false;
   let errorText: string | null = null;
 
@@ -302,6 +312,26 @@ export function parseAgentOutput(text: string): ParsedAgentOutput {
       typeof item.text === "string"
     ) {
       lastMessage = item.text;
+    }
+
+    // `opencode run --format json` emits assistant text as
+    // `{ type: "text", part: { type: "text", text: "..." } }`. Retain
+    // text as it arrives, but only infer success after a `step_finish` whose
+    // reason is `stop`: `tool-calls` is a per-step boundary, so text plus it
+    // may still be a stream truncated by a restart or Windows launcher shim.
+    const part = o.part && typeof o.part === "object" ? (o.part as Record<string, unknown>) : null;
+    if (type === "text" && part && part.type === "text" && typeof part.text === "string") {
+      lastOpenCodeText = part.text;
+    }
+
+    if (type === "step_finish" && part && part.type === "step-finish") {
+      // A tool-using run emits `reason: "tool-calls"` before its next
+      // step, so only the documented terminal `stop` reason is a verdict.
+      // Do not turn other reasons into errors here: an error event, when
+      // present, carries the real provider message and wins below.
+      if (part.reason === "stop") {
+        sawCompletion = true;
+      }
     }
 
     if (type === "turn.completed" || type === "thread.completed") {
@@ -324,6 +354,9 @@ export function parseAgentOutput(text: string): ParsedAgentOutput {
   if (errorText) return { resultText: errorText, inferredExitCode: 1 };
   if (lastMessage !== null) {
     return { resultText: lastMessage, inferredExitCode: sawCompletion ? 0 : null };
+  }
+  if (lastOpenCodeText !== null) {
+    return { resultText: lastOpenCodeText, inferredExitCode: sawCompletion ? 0 : null };
   }
   if (sawCompletion) return { resultText: text.trim(), inferredExitCode: 0 };
 

@@ -108,7 +108,8 @@ DROP TABLE IF EXISTS schema_version;
 INSERT OR IGNORE INTO agents(id, display_name, created_at) VALUES
   ('claude',      'Claude Code',     0),
   ('codex',       'Codex CLI',       0),
-  ('antigravity', 'Antigravity CLI', 0);
+  ('antigravity', 'Antigravity CLI', 0),
+  ('opencode',    'OpenCode CLI',    0);
 `;
 
 /**

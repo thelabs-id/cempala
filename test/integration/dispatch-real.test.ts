@@ -1,6 +1,6 @@
 // test/integration/dispatch-real.test.ts
 //
-// AC-1, AC-2: actually spawn codex, claude and agy and have them do work.
+// AC-1, AC-2: actually spawn codex, claude, agy and OpenCode and have them do work.
 // AC-5: a long-running child returns 'running' at the timeout boundary.
 // AC-6 (direct reconcile): check_task on a killed running task reconciles it.
 // AC-9: needs_approval → approve_path → success on a real outside-home cwd.
@@ -17,7 +17,8 @@ import { checkTask } from "../../src/tools/check-task.ts";
 import { spawn } from "bun";
 import { sweepStaleTasks } from "../../src/reaper.ts";
 
-const SKIP_REASON = "set CEMPALA_INTEGRATION=1 to run integration tests (require codex + claude + agy on PATH)";
+const SKIP_REASON = "set CEMPALA_INTEGRATION=1 to run integration tests (require codex + claude + agy + opencode on PATH)";
+const OPENCODE_INTEGRATION_ENABLED = process.env.CEMPALA_OPENCODE_INTEGRATION === "1";
 
 /**
  * Kill a process AND its descendants.
@@ -163,6 +164,35 @@ module.exports = { add, sub };
           throw new Error(`expected completed or failed, got ${r.data.status}: ${JSON.stringify(r.data)}`);
         }
       }
+    } finally { env.cleanup(); }
+  }, { timeout: 600_000 });
+
+  test.skipIf(!OPENCODE_INTEGRATION_ENABLED)("OpenCode returns structured text through Cempala (allow_network=false)", async () => {
+    const env = makeIntEnv();
+    try {
+      const model = process.env.CEMPALA_OPENCODE_MODEL;
+      if (!model) {
+        throw new Error("set CEMPALA_OPENCODE_MODEL to a usable OpenCode model when enabling CEMPALA_OPENCODE_INTEGRATION=1");
+      }
+      env.cfg = {
+        ...env.cfg,
+        agents: { ...env.cfg.agents, opencode: { ...env.cfg.agents.opencode, model } },
+      };
+      const r = await dispatch(env.db, env.cfg, {
+        target_agent: "opencode",
+        prompt: "Reply with exactly CEMPALA_OPENCODE_OK. Do not edit files or use tools.",
+        cwd: env.homeCwd,
+        allow_network: false,
+        wait_seconds: 120,
+        created_by: "claude",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.data.status !== "completed") {
+        throw new Error(`OpenCode dispatch failed: ${JSON.stringify(r.data)}`);
+      }
+      expect(r.data.network_enforcement).toBe("tools_only");
+      expect(r.data.result.trim()).toBe("CEMPALA_OPENCODE_OK");
     } finally { env.cleanup(); }
   }, { timeout: 600_000 });
 
